@@ -1,64 +1,153 @@
 import SwiftUI
 
-/// Ten-band equalizer with presets.
+/// Ten-band equalizer with presets, Auto EQ and headphone correction.
 struct EqualizerView: View {
     @EnvironmentObject private var player: MusicPlayer
 
     var body: some View {
-        EqualizerForm(equalizer: player.equalizer)
+        EqualizerForm(equalizer: player.equalizer, songTitle: player.current == nil ? nil : player.title)
             .presentationDetents([.medium, .large])
     }
 }
 
 private struct EqualizerForm: View {
     @ObservedObject var equalizer: EqualizerSettings
+    let songTitle: String?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
-                Toggle("Equalizer", isOn: $equalizer.enabled)
-                Menu {
-                    ForEach(EqualizerSettings.presets.map { $0.0 }, id: \.self) { name in
-                        Button(name) { equalizer.apply(preset: name) }
+            ScrollView {
+                VStack(spacing: 18) {
+                    Toggle("Equalizer", isOn: $equalizer.enabled)
+
+                    Picker("Mode", selection: $equalizer.mode) {
+                        ForEach(EqualizerSettings.Mode.allCases) { Text($0.rawValue).tag($0) }
                     }
-                } label: {
-                    HStack {
-                        Text("Preset")
-                        Spacer()
-                        Text(equalizer.presetName).foregroundStyle(.secondary)
-                        Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                HStack(alignment: .bottom, spacing: 0) {
-                    ForEach(0..<10, id: \.self) { band in
-                        VStack(spacing: 6) {
-                            Text(String(format: "%+.0f", equalizer.gains[band]))
-                                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                            Slider(value: Binding(
-                                get: { Double(equalizer.gains[band]) },
-                                set: {
-                                    equalizer.gains[band] = Float($0)
-                                    equalizer.presetName = "Custom"
-                                    equalizer.enabled = true
-                                }
-                            ), in: -12...12)
-                            .rotationEffect(.degrees(-90))
-                            .frame(width: 170, height: 28)
-                            .frame(width: 30, height: 170)
-                            .accessibilityLabel("\(label(EqualizerSettings.frequencies[band])) band")
-                            Text(label(EqualizerSettings.frequencies[band]))
-                                .font(.system(size: 9)).foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
+                    .pickerStyle(.segmented)
+                    .onChange(of: equalizer.mode) { _, _ in equalizer.enabled = true }
+
+                    headphonePicker
+
+                    if equalizer.mode == .auto { autoCard } else { presetPicker }
+
+                    bands
+                        .disabled(!equalizer.enabled)
+                        .opacity(equalizer.enabled ? 1 : 0.4)
+
+                    if equalizer.enabled, equalizer.preamp < 0 {
+                        Text(String(format: "Headroom %.1f dB so boosts never distort.", equalizer.preamp))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .disabled(!equalizer.enabled)
-                .opacity(equalizer.enabled ? 1 : 0.4)
-                Spacer()
+                .padding()
             }
-            .padding()
             .navigationTitle("Equalizer")
             .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private var headphonePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Menu {
+                ForEach(HeadphoneProfile.allCases) { profile in
+                    Button(profile.name) {
+                        equalizer.headphone = profile
+                        equalizer.enabled = true
+                    }
+                }
+            } label: {
+                HStack {
+                    Text("Headphones")
+                    Spacer()
+                    Text(equalizer.headphone.name).foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text(equalizer.headphone.detail).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var presetPicker: some View {
+        Menu {
+            ForEach(EqualizerSettings.presets.map { $0.0 }, id: \.self) { name in
+                Button(name) { equalizer.apply(preset: name) }
+            }
+        } label: {
+            HStack {
+                Text("Preset")
+                Spacer()
+                Text(equalizer.presetName).foregroundStyle(.secondary)
+                Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var autoCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "wand.and.stars")
+                Text("Auto EQ").font(.headline)
+                Spacer()
+                if let result = equalizer.autoResult {
+                    Text(result.genre == .unknown ? "Genre unknown" : result.genre.name)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(.white.opacity(0.12), in: Capsule())
+                }
+            }
+            if let songTitle { Text(songTitle).font(.subheadline).lineLimit(1) }
+            if let result = equalizer.autoResult {
+                Text(result.summary).font(.caption).monospacedDigit()
+                Text(result.measured
+                     ? "Tuned from this song's measured sound and its genre."
+                     : "Tuned from the genre only; the sound is still being measured.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(songTitle == nil ? "Play a song to tune it." : "Measuring this song…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Text("Strength").font(.caption)
+                Slider(value: $equalizer.autoIntensity, in: 0...1.5)
+                Text("\(Int((equalizer.autoIntensity * 100).rounded()))%")
+                    .font(.caption).monospacedDigit().frame(width: 44, alignment: .trailing)
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// Manual mode edits the curve; Auto mode shows what it chose.
+    private var bands: some View {
+        let curve = equalizer.activeCurve
+        let editable = equalizer.mode == .manual
+        return HStack(alignment: .bottom, spacing: 0) {
+            ForEach(0..<10, id: \.self) { band in
+                VStack(spacing: 6) {
+                    Text(String(format: "%+.0f", curve[band]))
+                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                    Slider(value: Binding(
+                        get: { Double(curve[band]) },
+                        set: {
+                            guard editable else { return }
+                            equalizer.gains[band] = Float($0)
+                            equalizer.presetName = "Custom"
+                            equalizer.enabled = true
+                        }
+                    ), in: -12...12)
+                    .allowsHitTesting(editable)
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 170, height: 28)
+                    .frame(width: 30, height: 170)
+                    .accessibilityLabel("\(label(EqualizerSettings.frequencies[band])) band")
+                    Text(label(EqualizerSettings.frequencies[band]))
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+            }
         }
     }
 

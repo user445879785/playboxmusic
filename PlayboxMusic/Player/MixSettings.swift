@@ -312,12 +312,14 @@ final class MixSettings: ObservableObject {
     }
 }
 
-/// Ten-band equalizer state (32 Hz – 16 kHz) with presets.
+/// Ten-band equalizer state (32 Hz – 16 kHz) with presets, Auto EQ and a
+/// headphone correction layer.
 @MainActor
 final class EqualizerSettings: ObservableObject {
     static let frequencies: [Float] = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
     static let presets: [(String, [Float])] = [
         ("Flat", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ("Warm (soft highs)", [4, 4, 3, 1, 0, 0, -1, -2, -3, -1]),
         ("Bass Boost", [6, 5, 4, 2, 0, 0, 0, 0, 0, 0]),
         ("Treble Boost", [0, 0, 0, 0, 0, 1, 2, 4, 5, 6]),
         ("Vocal", [-2, -2, -1, 1, 3, 4, 3, 1, 0, -1]),
@@ -330,9 +332,21 @@ final class EqualizerSettings: ObservableObject {
         ("Loudness", [6, 4, 0, 0, -2, 0, -1, -2, 5, 2])
     ]
 
+    enum Mode: String, CaseIterable, Identifiable {
+        case manual = "Manual"
+        case auto = "Auto"
+        var id: String { rawValue }
+    }
+
     @Published var enabled: Bool { didSet { save() } }
     @Published var gains: [Float] { didSet { save() } }
     @Published var presetName: String { didSet { save() } }
+    @Published var mode: Mode { didSet { save() } }
+    /// How strongly Auto EQ applies its curve, 0…1.
+    @Published var autoIntensity: Double { didSet { save() } }
+    @Published var headphone: HeadphoneProfile { didSet { save() } }
+    /// Auto EQ's curve for the playing song, before intensity.
+    @Published var autoResult: AutoEQResult?
 
     init() {
         let defaults = UserDefaults.standard
@@ -340,12 +354,36 @@ final class EqualizerSettings: ObservableObject {
         gains = (defaults.array(forKey: "eq.gains") as? [Float]).flatMap { $0.count == 10 ? $0 : nil }
             ?? Array(repeating: 0, count: 10)
         presetName = defaults.string(forKey: "eq.preset") ?? "Flat"
+        mode = defaults.string(forKey: "eq.mode").flatMap(Mode.init) ?? .manual
+        autoIntensity = defaults.object(forKey: "eq.autoIntensity") as? Double ?? 1
+        headphone = defaults.string(forKey: "eq.headphone").flatMap(HeadphoneProfile.init) ?? .off
+    }
+
+    /// The curve the user sees and edits (manual) or Auto EQ chose.
+    var activeCurve: [Float] {
+        switch mode {
+        case .manual: gains
+        case .auto: (autoResult?.gains ?? Array(repeating: 0, count: 10)).map { $0 * Float(autoIntensity) }
+        }
+    }
+
+    /// Everything summed: the curve plus the headphone correction.
+    var finalGains: [Float] {
+        zip(activeCurve, headphone.gains).map { min(12, max(-12, $0 + $1)) }
+    }
+
+    /// Lowers the whole signal by the biggest boost (plus a little margin)
+    /// so boosted bass can never clip and distort.
+    var preamp: Float {
+        guard let peak = finalGains.max(), peak > 0 else { return 0 }
+        return -(peak + 0.5)
     }
 
     func apply(preset name: String) {
         guard let preset = Self.presets.first(where: { $0.0 == name }) else { return }
         presetName = name
         gains = preset.1
+        mode = .manual
         enabled = true
     }
 
@@ -354,5 +392,8 @@ final class EqualizerSettings: ObservableObject {
         defaults.set(enabled, forKey: "eq.enabled")
         defaults.set(gains, forKey: "eq.gains")
         defaults.set(presetName, forKey: "eq.preset")
+        defaults.set(mode.rawValue, forKey: "eq.mode")
+        defaults.set(autoIntensity, forKey: "eq.autoIntensity")
+        defaults.set(headphone.rawValue, forKey: "eq.headphone")
     }
 }

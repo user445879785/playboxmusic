@@ -55,6 +55,9 @@ struct TrackAnalysis: Codable, Sendable {
     var key: MusicalKey?
     /// Peak level per 10 ms (0…255), for detailed waveforms in the mix editor.
     var peaks: Data
+    /// Average level in ten octave bands (32 Hz … 16 kHz), in dB relative to
+    /// the mid range, for Auto EQ.
+    var bands: [Float]?
 
     static let peakSeconds = 0.01
 
@@ -107,9 +110,11 @@ actor TrackAnalyzer {
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        directory = caches.appendingPathComponent("Analysis-v3", isDirectory: true)
-        // Older analyses have no key or detailed waveform.
-        try? FileManager.default.removeItem(at: caches.appendingPathComponent("Analysis-v2", isDirectory: true))
+        directory = caches.appendingPathComponent("Analysis-v4", isDirectory: true)
+        // Older analyses have no key, detailed waveform or spectrum.
+        for old in ["Analysis-v2", "Analysis-v3"] {
+            try? FileManager.default.removeItem(at: caches.appendingPathComponent(old, isDirectory: true))
+        }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -180,6 +185,7 @@ actor TrackAnalyzer {
         peaks.reserveCapacity(Int(Double(file.length) / sampleRate / TrackAnalysis.peakSeconds) + 1)
         var finePeak: Float = 0
         let chroma = ChromaAccumulator(sampleRate: sampleRate)
+        let spectrum = SpectrumAccumulator(sampleRate: sampleRate)
         let channels = Int(format.channelCount)
 
         while file.framePosition < file.length {
@@ -195,6 +201,7 @@ actor TrackAnalyzer {
                 fineCount += 1
                 finePeak = max(finePeak, abs(sample))
                 chroma.add(sample)
+                spectrum.add(sample)
                 if fineCount == fineWindow {
                     fine.append(level(fineSum / Float(fineCount)))
                     peaks.append(UInt8(min(255, finePeak * 255)))
@@ -230,7 +237,8 @@ actor TrackAnalyzer {
             firstBeat: beat,
             envelope: envelope,
             key: chroma.key(),
-            peaks: peaks
+            peaks: peaks,
+            bands: spectrum.bands()
         )
     }
 
@@ -290,6 +298,92 @@ actor TrackAnalyzer {
         var beatIndex = begin + phase
         while beatIndex - period >= start { beatIndex -= period }
         return (bpm, Double(beatIndex) * step)
+    }
+}
+
+/// Measures the song's long-term tonal balance in ten octave bands by taking
+/// a 4096-sample FFT every half second of audible music.
+private final class SpectrumAccumulator {
+    static let centres: [Double] = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    private static let size = 4096
+    private let hop: Int
+    private let fft: vDSP.FFT<DSPSplitComplex>?
+    private var window = [Float](repeating: 0, count: SpectrumAccumulator.size)
+    private var frame: [Float] = []
+    private var skipping = 0
+    /// Band index for each FFT bin, or -1 outside every band.
+    private var bandOfBin: [Int] = []
+    private var power = [Double](repeating: 0, count: 10)
+    private var frames = 0
+
+    init(sampleRate: Double) {
+        hop = max(Self.size, Int(sampleRate * 0.5))
+        fft = vDSP.FFT(log2n: 12, radix: .radix2, ofType: DSPSplitComplex.self)
+        vDSP_hann_window(&window, vDSP_Length(Self.size), Int32(vDSP_HANN_NORM))
+        frame.reserveCapacity(Self.size)
+        let half = Self.size / 2
+        bandOfBin = (0..<half).map { bin -> Int in
+            let frequency = Double(bin) * sampleRate / Double(Self.size)
+            guard bin > 0 else { return -1 }
+            for (index, centre) in Self.centres.enumerated()
+                where frequency >= centre / 2.0.squareRoot() && frequency < centre * 2.0.squareRoot() {
+                return index
+            }
+            return -1
+        }
+    }
+
+    func add(_ sample: Float) {
+        if skipping > 0 {
+            skipping -= 1
+            return
+        }
+        frame.append(sample)
+        guard frame.count == Self.size else { return }
+        process()
+        frame.removeAll(keepingCapacity: true)
+        skipping = hop - Self.size
+    }
+
+    private func process() {
+        guard let fft else { return }
+        // Skip near-silent frames (intros, gaps, fade-outs).
+        var meanSquare: Float = 0
+        vDSP_measqv(frame, 1, &meanSquare, vDSP_Length(Self.size))
+        guard meanSquare > 1e-5 else { return }
+
+        let half = Self.size / 2
+        var input = [Float](repeating: 0, count: Self.size)
+        vDSP_vmul(frame, 1, window, 1, &input, 1, vDSP_Length(Self.size))
+        var real = [Float](repeating: 0, count: half)
+        var imaginary = [Float](repeating: 0, count: half)
+        var squares = [Float](repeating: 0, count: half)
+        real.withUnsafeMutableBufferPointer { realPointer in
+            imaginary.withUnsafeMutableBufferPointer { imaginaryPointer in
+                var split = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imaginaryPointer.baseAddress!)
+                input.withUnsafeBytes { raw in
+                    vDSP_ctoz(raw.bindMemory(to: DSPComplex.self).baseAddress!, 2, &split, 1, vDSP_Length(half))
+                }
+                var output = split
+                fft.forward(input: split, output: &output)
+                vDSP_zvmags(&output, 1, &squares, 1, vDSP_Length(half))
+            }
+        }
+        // Bin 0 holds DC and the Nyquist term packed together; it is unused.
+        for bin in 1..<half where bandOfBin[bin] >= 0 {
+            power[bandOfBin[bin]] += Double(squares[bin])
+        }
+        frames += 1
+    }
+
+    /// Band levels in dB relative to the 250 Hz – 4 kHz average.
+    func bands() -> [Float]? {
+        guard frames >= 8 else { return nil }
+        let levels = power.map { Float(10 * log10(max($0 / Double(frames), 1e-12))) }
+        let mid = levels[3...7].reduce(0, +) / 5
+        // Bands with almost nothing in them (a lossy file cut at 16 kHz)
+        // bottom out at -40 so they cannot ask for huge boosts.
+        return levels.map { max(-40, $0 - mid) }
     }
 }
 
