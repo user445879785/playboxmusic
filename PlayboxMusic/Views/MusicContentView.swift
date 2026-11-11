@@ -6,6 +6,7 @@ struct MusicContentView: View {
     @EnvironmentObject private var player: MusicPlayer
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("playbox.music.username") private var username = ""
+    @StateObject private var updater = UpdateChecker()
 
     var body: some View {
         TabView {
@@ -27,6 +28,16 @@ struct MusicContentView: View {
         }
         .preferredColorScheme(.dark)
         .tint(.brand)
+        .environmentObject(updater)
+        .sheet(item: $updater.prompt) { release in
+            UpdateSheet(release: release).environmentObject(updater)
+        }
+        // "Open in Playbox Music" from Files, Safari downloads or AirDrop.
+        .onOpenURL { url in
+            guard url.isFileURL else { return }
+            if library.importFiles([url]) > 0 { library.reload() }
+        }
+        .task { await updater.checkAutomatically() }
         .task {
             player.metaProvider = { [library] track in library.meta(for: track) }
             player.similarProvider = { [library] track, played in library.similar(to: track, excluding: played) }
@@ -176,8 +187,13 @@ private struct MiniPlayerInset: ViewModifier {
         )
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Open Now Playing") { showNowPlaying = true }
-        .sheet(isPresented: $showNowPlaying) {
-            NowPlayingView()
+        .fullScreenCover(isPresented: $showNowPlaying) {
+            NowPlayingView(onSwipeClose: {
+                // The swipe already slid the page off screen; skip the system slide.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { showNowPlaying = false }
+            })
                 .environmentObject(player)
                 .environmentObject(library)
                 .environmentObject(client)

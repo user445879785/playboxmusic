@@ -221,6 +221,7 @@ final class MusicPlayer: ObservableObject {
 
     let mix = MixSettings()
     let equalizer = EqualizerSettings()
+    let headphones = HeadphoneMonitor()
 
     private let engine = AVAudioEngine()
     private let bus = AVAudioMixerNode()
@@ -271,6 +272,19 @@ final class MusicPlayer: ObservableObject {
             .store(in: &cancellables)
         mix.objectWillChange
             .sink { [weak self] in Task { @MainActor in self?.preparePlan() } }
+            .store(in: &cancellables)
+        // Earbuds connecting pick their own correction curve.
+        headphones.$routeName
+            .removeDuplicates()
+            .sink { [weak self] name in
+                Task { @MainActor in
+                    guard let self, self.equalizer.autoDetectHeadphones,
+                          let profile = HeadphoneProfile.detect(name),
+                          self.equalizer.headphone != profile else { return }
+                    self.equalizer.headphone = profile
+                    self.notice = "Tuned for \(profile.name)"
+                }
+            }
             .store(in: &cancellables)
         configureRemoteCommands()
         observeSession()
@@ -551,7 +565,7 @@ final class MusicPlayer: ObservableObject {
     private func setCurrent(_ track: Track) {
         current = track
         currentMeta = metaProvider?(track)
-        if equalizer.enabled, equalizer.mode == .auto { updateAutoEQ(track) }
+        if equalizer.enabled { updateAutoEQ(track) }
         clock.set(elapsed: vlc == nil ? deck.currentTime : 0, duration: vlc == nil ? deck.duration : 0, running: true)
         isPlaying = true
         artwork = nil
@@ -771,7 +785,7 @@ final class MusicPlayer: ObservableObject {
     /// boosts never clip. Changes fade over about 300 ms, so a new song's
     /// Auto EQ curve slides in instead of clicking.
     private func applyEqualizer() {
-        if equalizer.enabled, equalizer.mode == .auto, let current, autoTrack != current {
+        if equalizer.enabled, let current, autoTrack != current {
             updateAutoEQ(current)
         }
         eq.bypass = !equalizer.enabled
@@ -794,18 +808,23 @@ final class MusicPlayer: ObservableObject {
         }
     }
 
-    /// Reads the song's genre and measured spectrum, then builds its curve.
+    /// Reads the song's genre and measured spectrum, then builds its Auto
+    /// curve and looks up any curve remembered for the song, album or genre.
     private func updateAutoEQ(_ track: Track) {
         autoTrack = track
         autoTask?.cancel()
         let url = track.url
         let artist = currentMeta?.artist
+        let album = currentMeta?.album
         let title = currentMeta?.title ?? track.title
+        // The song and album are known now; the genre follows.
+        equalizer.context = .init(song: url.lastPathComponent, album: album, genre: .unknown)
         autoTask = Task { [weak self] in
             async let analysis = TrackAnalyzer.shared.analysis(for: url)
             async let genre = GenreResolver.shared.genre(for: url, artist: artist, title: title)
             let (facts, kind) = await (analysis, genre)
             guard let self, !Task.isCancelled, self.current == track else { return }
+            self.equalizer.context = .init(song: url.lastPathComponent, album: album, genre: kind)
             self.equalizer.autoResult = AutoEqualizer.result(bands: facts?.bands, genre: kind)
         }
     }

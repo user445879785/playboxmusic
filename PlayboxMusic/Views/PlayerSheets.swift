@@ -7,6 +7,7 @@ struct EqualizerView: View {
     var body: some View {
         EqualizerForm(equalizer: player.equalizer, songTitle: player.current == nil ? nil : player.title)
             .presentationDetents([.medium, .large])
+            .presentationBackground(.regularMaterial)
     }
 }
 
@@ -28,7 +29,13 @@ private struct EqualizerForm: View {
 
                     headphonePicker
 
-                    if equalizer.mode == .auto { autoCard } else { presetPicker }
+                    if let match = equalizer.savedMatch {
+                        savedCard(match)
+                    } else if equalizer.mode == .auto {
+                        autoCard
+                    } else {
+                        presetPicker
+                    }
 
                     bands
                         .disabled(!equalizer.enabled)
@@ -38,6 +45,9 @@ private struct EqualizerForm: View {
                         Text(String(format: "Headroom %.1f dB so boosts never distort.", equalizer.preamp))
                             .font(.caption).foregroundStyle(.secondary)
                     }
+
+                    rememberMenu
+                        .disabled(!equalizer.enabled || songTitle == nil)
                 }
                 .padding()
             }
@@ -64,7 +74,42 @@ private struct EqualizerForm: View {
                 }
             }
             Text(equalizer.headphone.detail).font(.caption).foregroundStyle(.secondary)
+            Toggle("Switch automatically when earbuds connect", isOn: $equalizer.autoDetectHeadphones)
+                .font(.caption)
+                .tint(.brand)
         }
+    }
+
+    /// Saves what you hear now for the song, its album or its genre.
+    private var rememberMenu: some View {
+        Menu {
+            ForEach(EqualizerSettings.Scope.allCases) { scope in
+                Button(scope.rawValue) { equalizer.remember(scope) }
+                    .disabled(!equalizer.canRemember(scope))
+            }
+        } label: {
+            Label("Remember This Sound For…", systemImage: "bookmark")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private func savedCard(_ match: EqualizerSettings.SavedMatch) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bookmark.fill").foregroundStyle(Color.brand)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Remembered for \(match.scope.rawValue.lowercased())").font(.subheadline.weight(.semibold))
+                Text("Your saved sound beats Auto and Manual here. Drag bands to adjust it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Forget") { withAnimation(.snappy) { equalizer.forgetSaved() } }
+                .font(.subheadline)
+        }
+        .padding(12)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var presetPicker: some View {
@@ -123,7 +168,7 @@ private struct EqualizerForm: View {
     /// Manual mode edits the curve; Auto mode shows what it chose.
     private var bands: some View {
         let curve = equalizer.activeCurve
-        let editable = equalizer.mode == .manual
+        let editable = equalizer.mode == .manual || equalizer.savedMatch != nil
         return HStack(alignment: .bottom, spacing: 0) {
             ForEach(0..<10, id: \.self) { band in
                 VStack(spacing: 6) {
@@ -131,14 +176,9 @@ private struct EqualizerForm: View {
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                     Slider(value: Binding(
                         get: { Double(curve[band]) },
-                        set: {
-                            guard editable else { return }
-                            equalizer.gains[band] = Float($0)
-                            equalizer.presetName = "Custom"
-                            equalizer.enabled = true
-                        }
+                        set: { equalizer.setBand(band, Float($0)) }
                     ), in: -12...12)
-                    .allowsHitTesting(editable)
+                    .tint(editable ? Color.brand : .white.opacity(0.6))
                     .rotationEffect(.degrees(-90))
                     .frame(width: 170, height: 28)
                     .frame(width: 30, height: 170)

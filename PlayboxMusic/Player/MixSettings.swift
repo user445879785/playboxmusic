@@ -347,6 +347,82 @@ final class EqualizerSettings: ObservableObject {
     @Published var headphone: HeadphoneProfile { didSet { save() } }
     /// Auto EQ's curve for the playing song, before intensity.
     @Published var autoResult: AutoEQResult?
+    /// Switch the headphone profile when matching earbuds connect.
+    @Published var autoDetectHeadphones: Bool { didSet { save() } }
+    /// Curves remembered for a song, an album or a genre (key → gains).
+    @Published private(set) var saved: [String: [Float]] { didSet { save() } }
+    /// What is playing, used to find a remembered curve.
+    @Published var context: SongContext?
+
+    /// Where a remembered curve applies. The most specific one wins:
+    /// song, then album, then genre (like AAEQ's priority list).
+    enum Scope: String, CaseIterable, Identifiable {
+        case song = "This Song", album = "This Album", genre = "This Genre"
+        var id: String { rawValue }
+    }
+
+    struct SongContext: Equatable {
+        var song: String
+        var album: String?
+        var genre: MusicGenre
+
+        func key(_ scope: Scope) -> String? {
+            switch scope {
+            case .song: "song:" + song
+            case .album: album.map { "album:" + $0.lowercased() }
+            case .genre: genre == .unknown ? nil : "genre:" + genre.rawValue
+            }
+        }
+    }
+
+    struct SavedMatch: Equatable {
+        var scope: Scope
+        var key: String
+        var gains: [Float]
+    }
+
+    /// The remembered curve for the playing song, if there is one.
+    var savedMatch: SavedMatch? {
+        guard let context else { return nil }
+        for scope in Scope.allCases {
+            if let key = context.key(scope), let gains = saved[key], gains.count == 10 {
+                return SavedMatch(scope: scope, key: key, gains: gains)
+            }
+        }
+        return nil
+    }
+
+    func canRemember(_ scope: Scope) -> Bool { context?.key(scope) != nil }
+
+    /// Remembers what you hear now for the song, album or genre.
+    func remember(_ scope: Scope) {
+        guard let key = context?.key(scope) else { return }
+        saved[key] = activeCurve
+        enabled = true
+    }
+
+    func forgetSaved() {
+        guard let match = savedMatch else { return }
+        saved[match.key] = nil
+    }
+
+    /// Edits one band of whatever curve is in use.
+    func setBand(_ band: Int, _ gain: Float) {
+        if let match = savedMatch {
+            var gains = match.gains
+            gains[band] = gain
+            saved[match.key] = gains
+        } else {
+            // Dragging a band in Auto starts a manual curve from what you hear.
+            if mode == .auto {
+                gains = activeCurve
+                mode = .manual
+            }
+            gains[band] = gain
+            presetName = "Custom"
+        }
+        enabled = true
+    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -357,13 +433,16 @@ final class EqualizerSettings: ObservableObject {
         mode = defaults.string(forKey: "eq.mode").flatMap(Mode.init) ?? .manual
         autoIntensity = defaults.object(forKey: "eq.autoIntensity") as? Double ?? 1
         headphone = defaults.string(forKey: "eq.headphone").flatMap(HeadphoneProfile.init) ?? .off
+        autoDetectHeadphones = defaults.object(forKey: "eq.autoDetectHeadphones") as? Bool ?? true
+        saved = defaults.dictionary(forKey: "eq.saved") as? [String: [Float]] ?? [:]
     }
 
     /// The curve the user sees and edits (manual) or Auto EQ chose.
     var activeCurve: [Float] {
+        if let savedMatch { return savedMatch.gains }
         switch mode {
-        case .manual: gains
-        case .auto: (autoResult?.gains ?? Array(repeating: 0, count: 10)).map { $0 * Float(autoIntensity) }
+        case .manual: return gains
+        case .auto: return (autoResult?.gains ?? Array(repeating: 0, count: 10)).map { $0 * Float(autoIntensity) }
         }
     }
 
@@ -395,5 +474,7 @@ final class EqualizerSettings: ObservableObject {
         defaults.set(mode.rawValue, forKey: "eq.mode")
         defaults.set(autoIntensity, forKey: "eq.autoIntensity")
         defaults.set(headphone.rawValue, forKey: "eq.headphone")
+        defaults.set(autoDetectHeadphones, forKey: "eq.autoDetectHeadphones")
+        defaults.set(saved, forKey: "eq.saved")
     }
 }
