@@ -237,6 +237,10 @@ final class MusicPlayer: ObservableObject {
     private var rateRestore: (from: Float, startedAt: Date)?
     private var planTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
+    /// The song Auto EQ last measured, and the jobs that measure and fade.
+    private var autoTrack: Track?
+    private var autoTask: Task<Void, Never>?
+    private var rampTask: Task<Void, Never>?
 
     private var deck: AudioDeck { decks[active] }
     private var otherDeck: AudioDeck { decks[1 - active] }
@@ -547,6 +551,7 @@ final class MusicPlayer: ObservableObject {
     private func setCurrent(_ track: Track) {
         current = track
         currentMeta = metaProvider?(track)
+        if equalizer.enabled, equalizer.mode == .auto { updateAutoEQ(track) }
         clock.set(elapsed: vlc == nil ? deck.currentTime : 0, duration: vlc == nil ? deck.duration : 0, running: true)
         isPlaying = true
         artwork = nil
@@ -762,9 +767,47 @@ final class MusicPlayer: ObservableObject {
 
     // MARK: Equalizer
 
+    /// Applies the curve plus headphone correction, with a pre-gain cut so
+    /// boosts never clip. Changes fade over about 300 ms, so a new song's
+    /// Auto EQ curve slides in instead of clicking.
     private func applyEqualizer() {
+        if equalizer.enabled, equalizer.mode == .auto, let current, autoTrack != current {
+            updateAutoEQ(current)
+        }
         eq.bypass = !equalizer.enabled
-        for (band, gain) in zip(eq.bands, equalizer.gains) { band.gain = gain }
+        let targets = equalizer.finalGains
+        let preamp = equalizer.preamp
+        let starts = eq.bands.map(\.gain)
+        let startPreamp = eq.globalGain
+        rampTask?.cancel()
+        rampTask = Task { [weak self] in
+            let steps = 10
+            for step in 1...steps {
+                guard let self, !Task.isCancelled else { return }
+                let t = Float(step) / Float(steps)
+                for (index, band) in self.eq.bands.enumerated() where index < targets.count {
+                    band.gain = starts[index] + (targets[index] - starts[index]) * t
+                }
+                self.eq.globalGain = startPreamp + (preamp - startPreamp) * t
+                if step < steps { try? await Task.sleep(for: .milliseconds(30)) }
+            }
+        }
+    }
+
+    /// Reads the song's genre and measured spectrum, then builds its curve.
+    private func updateAutoEQ(_ track: Track) {
+        autoTrack = track
+        autoTask?.cancel()
+        let url = track.url
+        let artist = currentMeta?.artist
+        let title = currentMeta?.title ?? track.title
+        autoTask = Task { [weak self] in
+            async let analysis = TrackAnalyzer.shared.analysis(for: url)
+            async let genre = GenreResolver.shared.genre(for: url, artist: artist, title: title)
+            let (facts, kind) = await (analysis, genre)
+            guard let self, !Task.isCancelled, self.current == track else { return }
+            self.equalizer.autoResult = AutoEqualizer.result(bands: facts?.bands, genre: kind)
+        }
     }
 
     // MARK: Now Playing
