@@ -10,9 +10,6 @@ struct MusicContentView: View {
 
     @ObservedObject private var look = Appearance.shared
     @State private var tab = "search"
-    /// Tabs are built the first time they're opened, then kept alive so
-    /// each keeps its scroll position and navigation.
-    @State private var opened: Set<String> = ["search"]
 
     private var tabs: [ChromeTab] {
         [
@@ -28,15 +25,20 @@ struct MusicContentView: View {
         let dockHeight = GlassDock.baseHeight * look.dockScale
         let safeBottom = Self.deviceBottomInset
         let bottom = max(safeBottom - 8, 10)
-        ZStack {
-            page("search") { NavigationStack { MusicSearchView() }.withMiniPlayer() }
-            page("downloads") { NavigationStack { DownloadsView() }.withMiniPlayer() }
-            page("library") { NavigationStack { MusicLibraryView() }.withMiniPlayer() }
-            page("settings") { NavigationStack { MusicAccountView() } }
-        }
-        // Content scrolls under the glass; the last row and the mini player clear it.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: max(0, dockHeight + bottom - safeBottom + 6))
+        // Apple's TabView switches the pages and keeps each one's place;
+        // its own bar is hidden so only the glass dock shows. (Stacking the
+        // pages and fading them didn't switch on iOS 26.)
+        // Each page keeps clear of the dock, with the mini player just above it.
+        let clearance = max(0, dockHeight + bottom - safeBottom + 6)
+        TabView(selection: $tab) {
+            NavigationStack { MusicSearchView() }.withMiniPlayer()
+                .dockClearance(clearance).tag("search")
+            NavigationStack { DownloadsView() }.withMiniPlayer()
+                .dockClearance(clearance).tag("downloads")
+            NavigationStack { MusicLibraryView() }.withMiniPlayer()
+                .dockClearance(clearance).tag("library")
+            NavigationStack { MusicAccountView() }
+                .dockClearance(clearance).tag("settings")
         }
         .overlay(alignment: .bottom) {
             GlassDock(tabs: tabs, selection: $tab, accent: look.accent,
@@ -50,7 +52,6 @@ struct MusicContentView: View {
         }
         // A new accent repaints every screen.
         .id(look.accentHex)
-        .onChange(of: tab) { _, new in opened.insert(new) }
         .preferredColorScheme(.dark)
         .tint(.brand)
         .environmentObject(updater)
@@ -87,16 +88,6 @@ struct MusicContentView: View {
 
     private static var deviceBottomInset: CGFloat {
         (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.bottom ?? 34
-    }
-
-    @ViewBuilder
-    private func page<Content: View>(_ id: String, @ViewBuilder _ content: () -> Content) -> some View {
-        if opened.contains(id) {
-            content()
-                .opacity(tab == id ? 1 : 0)
-                .allowsHitTesting(tab == id)
-                .accessibilityHidden(tab != id)
-        }
     }
 
     /// Sockets do not survive long suspensions; sign back in on return.
@@ -257,4 +248,12 @@ private struct MiniProgressLine: View {
 
 extension View {
     func withMiniPlayer() -> some View { modifier(MiniPlayerInset()) }
+}
+
+private extension View {
+    /// Room for the glass dock under a page, and hides the system tab bar.
+    func dockClearance(_ height: CGFloat) -> some View {
+        safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: height) }
+            .toolbar(.hidden, for: .tabBar)
+    }
 }

@@ -203,18 +203,22 @@ struct MusicSearchView: View {
         }
         .navigationDestination(for: GenreRoute.self) { GenreView(route: $0) }
         .toolbar {
-            Menu {
-                Toggle("Audio files only", isOn: $audioOnly)
-                Toggle("Whole words only", isOn: $exactWords)
-                Picker("Sort", selection: $sort) {
-                    ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+            // Only in Soulseek mode. Hiding it with opacity left iOS 26's
+            // glass bubble on screen with no icon in it.
+            if mode == .soulseek {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Toggle("Audio files only", isOn: $audioOnly)
+                        Toggle("Whole words only", isOn: $exactWords)
+                        Picker("Sort", selection: $sort) {
+                            ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease")
+                    }
+                    .accessibilityLabel("Filter and sort")
                 }
-            } label: {
-                Image(systemName: "line.3.horizontal.decrease.circle")
             }
-            .accessibilityLabel("Filter and sort")
-            .opacity(mode == .soulseek ? 1 : 0)
-            .disabled(mode != .soulseek)
         }
     }
 
