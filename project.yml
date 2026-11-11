@@ -32,6 +32,13 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         NSLocalNetworkUsageDescription: Playbox Music accepts incoming Soulseek peer connections for searches and downloads.
+        NSBluetoothAlwaysUsageDescription: Playbox Music reads your earbuds' battery level over Bluetooth.
+        # Lets Files, Safari and AirDrop send songs with "Open in Playbox Music".
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Audio
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.audio, org.xiph.flac, public.mp3, public.mpeg-4-audio, com.microsoft.waveform-audio]
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

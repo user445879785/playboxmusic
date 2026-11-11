@@ -12,7 +12,11 @@ struct NowPlayingView: View {
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var client: SoulseekClient
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Closes without the system animation, after a swipe already moved the page away.
+    var onSwipeClose: (() -> Void)?
     @State private var sheet: Sheet?
+    @State private var lyricsFrame: CGRect?
     @State private var showLyrics = false
     @State private var lyrics: [LyricLine] = []
     @State private var lyricsLoading = false
@@ -25,6 +29,7 @@ struct NowPlayingView: View {
     private var isFavourite: Bool { player.current.map(library.isFavourite) ?? false }
 
     private var slide: AnyTransition {
+        if reduceMotion { return .opacity }
         let distance: CGFloat = player.skipDirection >= 0 ? 360 : -360
         return .asymmetric(
             insertion: .offset(x: distance).combined(with: .opacity).combined(with: .scale(scale: 0.92)),
@@ -44,6 +49,8 @@ struct NowPlayingView: View {
                             if player.duration > 0 { player.seek(to: time / player.duration) }
                         }
                         .frame(width: proxy.size.width - 48, height: side)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { lyricsFrame = $0 }
+                        .onDisappear { lyricsFrame = nil }
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                     } else {
                         CoverView(side: side, coverMenu: { coverMenu }, onLike: like)
@@ -59,8 +66,10 @@ struct NowPlayingView: View {
                     .padding(.top, 12)
                 transport
                     .padding(.top, 10)
-                volume
-                    .padding(.top, 16)
+                VolumeBar()
+                    .padding(.top, 14)
+                HeadphoneChip(monitor: player.headphones, equalizer: player.equalizer)
+                    .padding(.top, 6)
                 bottomBar
                     .padding(.top, 14)
                     .padding(.bottom, 8)
@@ -70,8 +79,11 @@ struct NowPlayingView: View {
         }
         .background { backdrop }
         .foregroundStyle(.white)
+        .modifier(InteractiveDismiss(blocked: showLyrics ? lyricsFrame : nil) {
+            if let onSwipeClose { onSwipeClose() } else { dismiss() }
+        })
         .preferredColorScheme(.dark)
-        .presentationBackground(.black)
+        .presentationBackground(.clear)
         .overlay(alignment: .top) { noticeBanner }
         .sensoryFeedback(.impact(weight: .light), trigger: player.isPlaying)
         .sensoryFeedback(.selection, trigger: player.current)
@@ -157,6 +169,7 @@ struct NowPlayingView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(player.title)
                     .font(.title2.weight(.bold))
+                    .tracking(-0.4)
                     .lineLimit(1)
                 Text(player.subtitle)
                     .font(.body)
@@ -232,14 +245,6 @@ struct NowPlayingView: View {
             .animation(.snappy(duration: 0.2), value: on)
         }
         .buttonStyle(PressScaleStyle())
-    }
-
-    private var volume: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "speaker.fill").font(.caption).foregroundStyle(.white.opacity(0.5))
-            SystemVolumeSlider().frame(height: 34)
-            Image(systemName: "speaker.wave.3.fill").font(.caption).foregroundStyle(.white.opacity(0.5))
-        }
     }
 
     private var bottomBar: some View {
@@ -415,6 +420,7 @@ private struct CoverView<MenuContent: View>: View {
     @ViewBuilder let coverMenu: () -> MenuContent
     let onLike: () -> Void
     @State private var dragOffset: CGFloat = 0
+    @State private var dragAxis: Axis?
     @State private var heartBurst = false
 
     var body: some View {
@@ -458,18 +464,29 @@ private struct CoverView<MenuContent: View>: View {
                 withAnimation(.easeOut(duration: 0.25)) { heartBurst = false }
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 15)
+        // Runs alongside the page's swipe-down: a sideways drag changes the
+        // track, a downward one closes the player, decided after 10 pt.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10)
                 .onChanged { value in
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    if dragAxis == nil {
+                        dragAxis = abs(value.translation.width) > abs(value.translation.height) ? .horizontal : .vertical
+                    }
+                    guard dragAxis == .horizontal else { return }
                     dragOffset = value.translation.width
                 }
                 .onEnded { value in
-                    let width = value.translation.width
-                    let velocity = value.predictedEndTranslation.width
-                    withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.85)) { dragOffset = 0 }
-                    if width < -80 || velocity < -300 { player.next() }
-                    else if width > 80 || velocity > 300 { player.previous() }
+                    defer { dragAxis = nil }
+                    guard dragAxis == .horizontal else { return }
+                    // Project where the flick is heading, then decide.
+                    let projected = value.translation.width + Fluid.project(value.velocity.width, deceleration: 0.99)
+                    let velocity = value.velocity.width
+                    withAnimation(.interpolatingSpring(duration: 0.35, bounce: 0.15,
+                                                       initialVelocity: Fluid.relative(velocity, from: dragOffset, to: 0))) {
+                        dragOffset = 0
+                    }
+                    if projected < -side * 0.35 { player.next() }
+                    else if projected > side * 0.35 { player.previous() }
                 }
         )
         .contextMenu { coverMenu() }
@@ -624,15 +641,269 @@ struct Scrubber: View {
     }
 }
 
-/// The iPhone's own volume, same as the side buttons.
-private struct SystemVolumeSlider: UIViewRepresentable {
+// MARK: Fluid motion helpers (Apple's "Designing Fluid Interfaces")
+
+enum Fluid {
+    /// Where a flick will come to rest, from its release velocity (pt/s).
+    /// 0.998 feels like a scroll view, 0.99 is snappier.
+    static func project(_ velocity: CGFloat, deceleration: CGFloat = 0.998) -> CGFloat {
+        (velocity / 1000) * deceleration / (1 - deceleration)
+    }
+
+    /// Resistance past an edge: follows less the further you pull.
+    static func rubberband(_ overshoot: CGFloat, dimension: CGFloat, constant: CGFloat = 0.55) -> CGFloat {
+        guard dimension > 0 else { return 0 }
+        let sign: CGFloat = overshoot < 0 ? -1 : 1
+        let distance = abs(overshoot)
+        return sign * (distance * dimension * constant) / (dimension + constant * distance)
+    }
+
+    /// Release velocity relative to the distance left, for spring hand-off.
+    static func relative(_ velocity: CGFloat, from current: CGFloat, to target: CGFloat) -> Double {
+        let distance = target - current
+        guard abs(distance) > 1 else { return 0 }
+        return Double(min(30, max(-30, velocity / distance)))
+    }
+}
+
+/// Swipe the whole player down to close it, from anywhere on the page.
+/// The page follows the finger 1:1, rubber-bands when pulled up, and on
+/// release continues at the finger's speed: away if the flick is heading
+/// far enough down, back into place otherwise.
+struct InteractiveDismiss: ViewModifier {
+    /// A region that scrolls on its own (lyrics), where the swipe is ignored.
+    let blocked: CGRect?
+    let onDismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var offset: CGFloat = 0
+    @State private var height: CGFloat = 800
+    @State private var axis: Axis?
+    @State private var ignored = false
+
+    func body(content: Content) -> some View {
+        let progress = max(0, min(1, offset / max(1, height)))
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            .offset(y: offset)
+            .shadow(color: .black.opacity(offset > 1 ? 0.45 : 0), radius: 24, y: -4)
+            .background {
+                // Dims what's behind, lifting as the page slides away.
+                Color.black.opacity(offset > 1 ? 0.5 * (1 - progress) : 0).ignoresSafeArea()
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                    .onChanged { value in
+                        if axis == nil {
+                            ignored = blocked?.contains(value.startLocation) ?? false
+                            axis = abs(value.translation.height) > abs(value.translation.width) ? .vertical : .horizontal
+                        }
+                        guard axis == .vertical, !ignored else { return }
+                        let dy = value.translation.height
+                        offset = dy >= 0 ? dy : Fluid.rubberband(dy, dimension: height)
+                    }
+                    .onEnded { value in
+                        defer {
+                            axis = nil
+                            ignored = false
+                        }
+                        guard axis == .vertical, !ignored else { return }
+                        let velocity = value.velocity.height
+                        let projected = offset + Fluid.project(velocity)
+                        if offset > 0, velocity > -50, projected > height * 0.3 {
+                            if reduceMotion {
+                                offset = 0
+                                onDismiss()
+                                return
+                            }
+                            let start = offset
+                            withAnimation(.interpolatingSpring(duration: 0.3, bounce: 0,
+                                                               initialVelocity: Fluid.relative(velocity, from: start, to: height))) {
+                                offset = height
+                            } completion: {
+                                onDismiss()
+                            }
+                        } else {
+                            let start = offset
+                            withAnimation(.interpolatingSpring(duration: 0.4, bounce: abs(velocity) > 300 ? 0.2 : 0,
+                                                               initialVelocity: Fluid.relative(velocity, from: start, to: 0))) {
+                                offset = 0
+                            }
+                        }
+                    }
+            )
+    }
+}
+
+/// The iPhone's volume (same as the side buttons) as a capsule that tracks
+/// your finger from where you grab it, thickens while held, stretches past
+/// the ends and gives a tick when it hits silent or full. The speaker icons
+/// sit outside the track, so nothing ever covers them.
+private struct VolumeBar: View {
+    @StateObject private var volume = SystemVolume()
+    @State private var grabbedAt: Float?
+    @State private var stretch: CGFloat = 0
+    @State private var width: CGFloat = 1
+
+    private var held: Bool { grabbedAt != nil }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "speaker.fill")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(held ? 0.9 : 0.5))
+                .scaleEffect(stretch < 0 ? 1.2 : 1)
+                .frame(width: 18)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.2))
+                Capsule().fill(.white.opacity(held ? 1 : 0.85))
+                    .frame(width: width * CGFloat(volume.level))
+            }
+            .frame(height: held ? 11 : 6)
+            .scaleEffect(x: 1 + abs(stretch) / max(width, 1), anchor: stretch < 0 ? .trailing : .leading)
+            .frame(height: 34)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if grabbedAt == nil { grabbedAt = volume.level }
+                        let raw = (grabbedAt ?? 0) + Float(value.translation.width / max(width, 1))
+                        volume.set(raw)
+                        let overshoot = CGFloat(raw < 0 ? raw : (raw > 1 ? raw - 1 : 0)) * width
+                        stretch = Fluid.rubberband(overshoot, dimension: width, constant: 0.2)
+                    }
+                    .onEnded { _ in
+                        grabbedAt = nil
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { stretch = 0 }
+                    }
+            )
+            .animation(.spring(response: 0.25, dampingFraction: 1), value: held)
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(held ? 0.9 : 0.5))
+                .scaleEffect(stretch > 0 ? 1.2 : 1)
+                .frame(width: 22)
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: stretch != 0)
+        .background { HiddenVolumeView(volume: volume).frame(width: 1, height: 1).opacity(0.01) }
+        .sensoryFeedback(.impact(weight: .light), trigger: volume.level <= 0 || volume.level >= 1) { _, edge in edge }
+        .accessibilityElement()
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(Int(volume.level * 100)) percent")
+        .accessibilityAdjustableAction { direction in
+            volume.set(volume.level + (direction == .increment ? 0.0625 : -0.0625))
+        }
+    }
+}
+
+/// Reads the system volume and sets it through a hidden MPVolumeView, the
+/// only way iOS lets apps change it (this also hides the volume HUD).
+private final class SystemVolume: ObservableObject {
+    @Published private(set) var level: Float = AVAudioSession.sharedInstance().outputVolume
+    weak var slider: UISlider?
+    private var observation: NSKeyValueObservation?
+
+    init() {
+        observation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] session, _ in
+            let value = session.outputVolume
+            DispatchQueue.main.async { self?.level = value }
+        }
+    }
+
+    func set(_ value: Float) {
+        let clamped = min(1, max(0, value))
+        level = clamped
+        slider?.setValue(clamped, animated: false)
+        slider?.sendActions(for: .valueChanged)
+    }
+}
+
+private struct HiddenVolumeView: UIViewRepresentable {
+    let volume: SystemVolume
+
     func makeUIView(context: Context) -> MPVolumeView {
-        let view = MPVolumeView(frame: .zero)
-        view.tintColor = .white
+        let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 120, height: 30))
+        view.isUserInteractionEnabled = false
         return view
     }
 
-    func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+    func updateUIView(_ uiView: MPVolumeView, context: Context) {
+        guard volume.slider == nil else { return }
+        DispatchQueue.main.async {
+            volume.slider = uiView.subviews.compactMap { $0 as? UISlider }.first
+        }
+    }
+}
+
+/// What you're listening on, with the earbuds' battery when they share it.
+/// Tap to read the battery (asks for Bluetooth the first time).
+private struct HeadphoneChip: View {
+    @ObservedObject var monitor: HeadphoneMonitor
+    @ObservedObject var equalizer: EqualizerSettings
+    @State private var info: String?
+
+    var body: some View {
+        if let name = monitor.routeName {
+            Button {
+                if case .unavailable(let reason) = monitor.battery {
+                    info = reason
+                } else if monitor.isHeadphones {
+                    monitor.refreshBattery()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: monitor.isHeadphones ? "earbuds" : "speaker.wave.2.fill")
+                    Text(name).lineLimit(1)
+                    if monitor.isHeadphones {
+                        battery
+                    }
+                    if equalizer.enabled, equalizer.headphone != .off, monitor.isHeadphones {
+                        Image(systemName: "slider.vertical.3").foregroundStyle(Color.brand)
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+                .animation(.snappy, value: monitor.battery)
+            }
+            .buttonStyle(PressScaleStyle())
+            .alert("Battery", isPresented: Binding(get: { info != nil }, set: { if !$0 { info = nil } })) {
+                Button("Try Again") { monitor.refreshBattery() }
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(info ?? "")
+            }
+            .accessibilityLabel("Output: \(name)")
+        }
+    }
+
+    @ViewBuilder
+    private var battery: some View {
+        switch monitor.battery {
+        case .idle:
+            Text("· Battery").foregroundStyle(.white.opacity(0.5))
+        case .searching:
+            ProgressView().controlSize(.mini).tint(.white)
+        case .level(let percent):
+            Image(systemName: Self.symbol(percent))
+                .foregroundStyle(percent <= 20 ? .red : .white.opacity(0.85))
+            Text("\(percent)%").monospacedDigit()
+        case .unavailable:
+            Image(systemName: "info.circle").foregroundStyle(.white.opacity(0.5))
+        }
+    }
+
+    private static func symbol(_ percent: Int) -> String {
+        switch percent {
+        case 88...: "battery.100percent"
+        case 63..<88: "battery.75percent"
+        case 38..<63: "battery.50percent"
+        case 13..<38: "battery.25percent"
+        default: "battery.0percent"
+        }
+    }
 }
 
 /// AirPlay and Bluetooth output picker.

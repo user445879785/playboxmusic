@@ -4,6 +4,8 @@ struct MusicLibraryView: View {
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var player: MusicPlayer
     @State private var filter = ""
+    @State private var importing = false
+    @State private var importedCount: Int?
 
     private var visible: [Track] {
         let needle = filter.trimmingCharacters(in: .whitespaces)
@@ -81,9 +83,46 @@ struct MusicLibraryView: View {
                     "No Music Yet",
                     systemImage: "music.note.list",
                     description: Text("Downloaded tracks are saved here and in Files › Playbox Music › Music.")
-                )
+                ) 
+                .overlay(alignment: .bottom) {
+                    Button { importing = true } label: {
+                        Label("Add Songs from Files", systemImage: "folder.badge.plus")
+                            .font(.headline)
+                            .padding(.horizontal, 20).padding(.vertical, 12)
+                            .background(Color.brand, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .padding(.bottom, 120)
+                }
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { importing = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("Add songs from Files")
+            }
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: MusicLibrary.importTypes,
+                      allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            withAnimation(.snappy) { importedCount = library.importFiles(urls) }
+        }
+        .overlay(alignment: .top) {
+            if let importedCount {
+                Text(importedCount == 0 ? "No playable songs found" :
+                        "Added \(importedCount) song\(importedCount == 1 ? "" : "s")")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(for: .seconds(2.5))
+                        withAnimation(.snappy) { self.importedCount = nil }
+                    }
+            }
+        }
+        .sensoryFeedback(.success, trigger: importedCount) { _, new in (new ?? 0) > 0 }
         .searchable(text: $filter, prompt: "Filter library")
         .navigationTitle("Library")
         .refreshable { library.reload() }

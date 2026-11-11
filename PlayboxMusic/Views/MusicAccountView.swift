@@ -41,6 +41,8 @@ struct MusicAccountView: View {
                 Button("Equalizer") { showEqualizer = true }
             }
 
+            UpdatesSection()
+
             Section("Status") {
                 LabeledContent("Server", value: statusText)
                 if let port = client.listenPort {
@@ -69,6 +71,42 @@ struct MusicAccountView: View {
         case .connecting: "Connecting…"
         case .connected: "Connected"
         case .failed(let reason): reason
+        }
+    }
+}
+
+/// Version, "Check for Updates" and the install sheet.
+private struct UpdatesSection: View {
+    @EnvironmentObject private var updater: UpdateChecker
+    @State private var showing: UpdateChecker.Release?
+
+    var body: some View {
+        Section {
+            LabeledContent("Version", value: updater.currentVersion)
+            switch updater.state {
+            case .available(let release):
+                Button {
+                    showing = release
+                } label: {
+                    Label("Update to \(release.version)", systemImage: "arrow.down.app.fill")
+                        .font(.body.weight(.semibold))
+                }
+            case .checking:
+                HStack { Text("Checking…"); Spacer(); ProgressView() }
+            default:
+                Button("Check for Updates") { Task { await updater.check() } }
+            }
+            if case .upToDate = updater.state {
+                Text("You're on the newest version.").font(.footnote).foregroundStyle(.secondary)
+            }
+            if case .failed(let reason) = updater.state {
+                Text(reason).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Updates")
+        }
+        .sheet(item: $showing) { release in
+            UpdateSheet(release: release).environmentObject(updater)
         }
     }
 }
