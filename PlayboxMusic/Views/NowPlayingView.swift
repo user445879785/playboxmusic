@@ -131,9 +131,8 @@ struct NowPlayingView: View {
 
     private var topBar: some View {
         HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.down").font(.headline).frame(width: 44, height: 44)
-            }
+            Button { dismiss() } label: { TopBarIcon(symbol: "chevron.down") }
+                .buttonStyle(PressScaleStyle())
             .accessibilityLabel("Close Now Playing")
             Spacer()
             MixStatusPill(clock: player.clock) { sheet = .mix }
@@ -141,8 +140,13 @@ struct NowPlayingView: View {
             Menu {
                 coverMenu
             } label: {
-                Image(systemName: "ellipsis").font(.headline).frame(width: 44, height: 44)
+                TopBarIcon(symbol: "ellipsis")
             }
+            // iOS 26 gives a Menu its own glass disc and drops the label's
+            // colour, leaving an empty bubble. The disc and icon are drawn here.
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
             .accessibilityLabel("More")
         }
     }
@@ -944,5 +948,21 @@ struct ArtworkThumbnail: View {
         .task(id: track.id) {
             image = await ArtworkResolver.shared.image(for: track, meta: library.meta(for: track))
         }
+    }
+}
+
+/// A top-bar button face: a soft disc with a white symbol, drawn by the app
+/// so iOS 26 can't swap in an empty glass bubble.
+private struct TopBarIcon: View {
+    let symbol: String
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 36, height: 36)
+            .background(.white.opacity(0.14), in: Circle())
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
     }
 }

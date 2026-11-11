@@ -25,7 +25,7 @@ struct MusicContentView: View {
     }
 
     var body: some View {
-        let dockHeight = ChromeDock.baseHeight * look.dockScale
+        let dockHeight = GlassDock.baseHeight * look.dockScale
         let safeBottom = Self.deviceBottomInset
         let bottom = max(safeBottom - 8, 10)
         ZStack {
@@ -39,7 +39,7 @@ struct MusicContentView: View {
             Color.clear.frame(height: max(0, dockHeight + bottom - safeBottom + 6))
         }
         .overlay(alignment: .bottom) {
-            GlassDock(tabs: tabs, selection: $tab, accent: look.accentUIColor,
+            GlassDock(tabs: tabs, selection: $tab, accent: look.accent,
                       transparency: look.dockTransparency, scale: look.dockScale)
                 .frame(height: dockHeight)
                 .padding(.horizontal, 14)

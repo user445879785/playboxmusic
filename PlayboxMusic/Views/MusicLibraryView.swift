@@ -126,7 +126,7 @@ struct MusicLibraryView: View {
             }
         }
         .sensoryFeedback(.success, trigger: importedCount) { _, new in (new ?? 0) > 0 }
-        .searchable(text: $filter, prompt: "Filter library")
+        .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: "Filter library")
         .navigationTitle("Library")
         .refreshable { library.reload() }
         .onAppear { library.reload() }
