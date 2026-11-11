@@ -70,6 +70,16 @@ final class MusicLibrary: ObservableObject {
         return picked
     }
 
+    /// The downloaded copy of a catalog song, if there is one.
+    func downloaded(title: String?, artist: String?) -> Track? {
+        guard let title = title?.lowercased() else { return nil }
+        return tracks.first { track in
+            guard let meta = meta(for: track) else { return false }
+            return meta.title.lowercased() == title
+                && (artist == nil || meta.artist?.lowercased() == artist?.lowercased())
+        }
+    }
+
     /// Whether a catalog song is already downloaded.
     func has(title: String?, artist: String?) -> Bool {
         guard let title = title?.lowercased() else { return false }

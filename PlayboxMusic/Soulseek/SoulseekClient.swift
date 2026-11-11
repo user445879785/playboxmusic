@@ -36,6 +36,24 @@ final class SoulseekClient: ObservableObject {
 
     @Published private(set) var fetches: [String: FetchState] = [:]
 
+    /// Whether a catalog song or album can be found on Soulseek, checked in
+    /// the background before it's offered, keyed like `fetches`.
+    enum Availability: Equatable {
+        case checking
+        /// The qualities on offer, best first.
+        case available([SlskQuality])
+        case unavailable
+    }
+
+    @Published private(set) var availability: [String: Availability] = [:]
+    /// Ranked sources per quality for each available song (one file each)…
+    private var songSources: [String: [SlskQuality: [SlskSearchResult]]] = [:]
+    /// …and for each album (one shared folder each).
+    private var albumSources: [String: [SlskQuality: [[SlskSearchResult]]]] = [:]
+    private var checkedAt: [String: Date] = [:]
+    private var probeSlots = 3
+    private var probeWaiters: [CheckedContinuation<Void, Never>] = []
+
     /// Called with the finished file, whether to play it, and catalog details.
     var onDownloadFinished: ((URL, Bool, TrackMeta?) -> Void)?
 
@@ -232,6 +250,161 @@ final class SoulseekClient: ObservableObject {
             }
         }
         return newID
+    }
+
+    // MARK: Catalog availability
+
+    /// Looks for a catalog song on Soulseek in the background (three
+    /// searches at a time), so the catalog only offers what can be fetched.
+    func checkSong(key: String, artist: String?, title: String, durationSeconds: Int?) async {
+        guard shouldCheck(key) else { return }
+        availability[key] = .checking
+        await acquireProbe()
+        defer { releaseProbe() }
+        let query = MusicText.clean([artist, title].compactMap { $0 }.joined(separator: " "))
+        let results = await gather(query: query)
+        let ranked = Self.rankedSongs(in: results, durationSeconds: durationSeconds)
+            .filter { SlskMatch.containsAll(MusicText.clean(title), in: $0.filename) }
+        let grouped = Dictionary(grouping: ranked, by: SlskQuality.of)
+        songSources[key] = grouped
+        checkedAt[key] = Date()
+        availability[key] = grouped.isEmpty ? .unavailable : .available(grouped.keys.sorted())
+    }
+
+    func checkAlbum(key: String, artist: String?, album: String, trackCount: Int?) async {
+        guard shouldCheck(key) else { return }
+        availability[key] = .checking
+        await acquireProbe()
+        defer { releaseProbe() }
+        let query = MusicText.clean([artist, album].compactMap { $0 }.joined(separator: " "))
+        let results = await gather(query: query, seconds: 7)
+        let folders = Self.rankedFolders(in: results, trackCount: trackCount)
+            .filter { files in
+                let path = files[0].filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: " ")
+                return SlskMatch.containsAll(MusicText.clean(album), in: path)
+            }
+        // A folder's quality is its most common file quality.
+        let grouped = Dictionary(grouping: folders) { files -> SlskQuality in
+            let counts = Dictionary(grouping: files, by: SlskQuality.of).mapValues(\.count)
+            return counts.max { $0.value < $1.value }?.key ?? .standard
+        }
+        albumSources[key] = grouped
+        checkedAt[key] = Date()
+        availability[key] = grouped.isEmpty ? .unavailable : .available(grouped.keys.sorted())
+    }
+
+    /// Answers for an album's songs from the album's own folders, so its
+    /// page doesn't need one search per song.
+    func adoptAlbumSongs(albumKey: String, songs: [(key: String, title: String)]) {
+        guard let folders = albumSources[albumKey] else { return }
+        for song in songs where availability[song.key] == nil {
+            var grouped: [SlskQuality: [SlskSearchResult]] = [:]
+            for (_, list) in folders {
+                for files in list {
+                    for file in files where SlskMatch.containsAll(MusicText.clean(song.title), in: file.title) {
+                        grouped[SlskQuality.of(file), default: []].append(file)
+                    }
+                }
+            }
+            guard !grouped.isEmpty else { continue }
+            songSources[song.key] = grouped
+            checkedAt[song.key] = Date()
+            availability[song.key] = .available(grouped.keys.sorted())
+        }
+    }
+
+    /// One quality on offer: its best source (one file for a song, a whole
+    /// folder for an album) and how many sources share it.
+    struct SourceOption: Identifiable {
+        let quality: SlskQuality
+        let files: [SlskSearchResult]
+        let sources: Int
+        var id: SlskQuality { quality }
+    }
+
+    /// The best source for each quality, to show before downloading.
+    func songOptions(_ key: String) -> [SourceOption] {
+        (songSources[key] ?? [:]).sorted { $0.key < $1.key }.compactMap { quality, files in
+            files.first.map { SourceOption(quality: quality, files: [$0], sources: files.count) }
+        }
+    }
+
+    func albumOptions(_ key: String) -> [SourceOption] {
+        (albumSources[key] ?? [:]).sorted { $0.key < $1.key }.compactMap { quality, folders in
+            folders.first.map { SourceOption(quality: quality, files: $0, sources: folders.count) }
+        }
+    }
+
+    /// Downloads a checked song in the chosen quality, moving to the next
+    /// user offering that quality if one doesn't send it.
+    func downloadSong(key: String, quality: SlskQuality, meta: TrackMeta, play: Bool) async {
+        let candidates = songSources[key]?[quality] ?? []
+        guard !candidates.isEmpty else {
+            fetches[key] = .notFound
+            return
+        }
+        for candidate in candidates.prefix(5) {
+            let id = download(candidate, play: play, meta: meta)
+            fetches[key] = .downloading([id])
+            if await supervise([id]) { return }
+            cancelTransfer(id, reason: "Skipped: \(candidate.username) didn't send the file.")
+        }
+        fetches[key] = .notFound
+    }
+
+    func downloadAlbum(key: String, quality: SlskQuality, meta: TrackMeta, play: Bool) async {
+        let folders = albumSources[key]?[quality] ?? []
+        guard !folders.isEmpty else {
+            fetches[key] = .notFound
+            return
+        }
+        for files in folders.prefix(3) {
+            let ids = files.enumerated().map { index, file in
+                var trackMeta = meta
+                trackMeta.title = ""
+                return download(file, play: play && index == 0, meta: trackMeta)
+            }
+            fetches[key] = .downloading(ids)
+            if await supervise(Array(ids.prefix(1))) { return }
+            ids.forEach { cancelTransfer($0, reason: "Skipped: trying another source.") }
+        }
+        fetches[key] = .notFound
+    }
+
+    /// Forgets a check so the next one searches again.
+    func forgetCheck(_ key: String) {
+        checkedAt[key] = nil
+        availability[key] = nil
+    }
+
+    /// Checks again after 20 minutes, since sharers come and go.
+    private func shouldCheck(_ key: String) -> Bool {
+        guard isConnected else { return false }
+        if availability[key] == .checking { return false }
+        if let at = checkedAt[key], Date().timeIntervalSince(at) < 20 * 60 { return false }
+        return true
+    }
+
+    private func acquireProbe() async {
+        if probeSlots > 0 {
+            probeSlots -= 1
+            return
+        }
+        await withCheckedContinuation { probeWaiters.append($0) }
+    }
+
+    private func releaseProbe() {
+        if probeWaiters.isEmpty { probeSlots += 1 } else { probeWaiters.removeFirst().resume() }
+    }
+
+    /// One background search, without touching the visible results.
+    private func gather(query: String, seconds: Double = 5) async -> [SlskSearchResult] {
+        guard let server, !query.isEmpty else { return [] }
+        let token = UInt32.random(in: 1...UInt32.max)
+        collectors[token] = []
+        try? await server.send(SlskWriter.message(code: 26) { $0.u32(token); $0.string(query) })
+        try? await Task.sleep(for: .seconds(seconds))
+        return collectors.removeValue(forKey: token) ?? []
     }
 
     // MARK: Catalog fetches

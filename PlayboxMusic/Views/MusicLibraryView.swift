@@ -24,7 +24,7 @@ struct MusicLibraryView: View {
                     .listRowSeparator(.hidden)
             }
             if filter.isEmpty, !library.favouriteTracks.isEmpty {
-                Section("Favourites") {
+                Section("Starred") {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 12) {
                             ForEach(Array(library.favouriteTracks.enumerated()), id: \.element.id) { offset, track in
@@ -48,8 +48,11 @@ struct MusicLibraryView: View {
                     HStack(spacing: 12) {
                         ArtworkThumbnail(track: track, size: 46)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                                .foregroundStyle(player.current?.id == track.id ? Color.brand : .primary)
+                            HStack(spacing: 4) {
+                                Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                    .foregroundStyle(player.current?.id == track.id ? Color.brand : .primary)
+                                if library.isFavourite(track) { StarMark() }
+                            }
                             Text("\(library.subtitle(of: track)) · \(track.fileExtension)")
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
@@ -69,9 +72,9 @@ struct MusicLibraryView: View {
                     Button {
                         library.setFavourite(track, !library.isFavourite(track))
                     } label: {
-                        Label("Like", systemImage: library.isFavourite(track) ? "heart.slash" : "heart")
+                        Label(library.isFavourite(track) ? "Unstar" : "Star", systemImage: library.isFavourite(track) ? "star.slash" : "star")
                     }
-                    .tint(.pink)
+                    .tint(.yellow)
                     Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
                         .tint(.indigo)
                 }

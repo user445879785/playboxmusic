@@ -4,8 +4,9 @@ import SwiftUI
 import UIKit
 
 extension Color {
-    /// Playbox green, used for accents, the play button glow and mix chips.
-    static let brand = Color(red: 0.12, green: 0.84, blue: 0.38)
+    /// The accent picked in Settings › Appearance (Playbox green by default),
+    /// used for accents, the play button glow and mix chips.
+    static var brand: Color { Color(uiColor: Appearance.shared.accentUIColor) }
 }
 
 /// Colours of the three automation lanes in the mix editor.
@@ -168,5 +169,29 @@ enum ArtworkPalette {
         return Color(hue: Double(hue),
                      saturation: Double(min(1, saturation * 1.25 + 0.08)),
                      brightness: Double(min(max(brightness, 0.32), 0.55)))
+    }
+}
+
+/// The small star beside a starred song's title, like Apple Music's.
+struct StarMark: View {
+    var size: CGFloat = 10
+
+    var body: some View {
+        Image(systemName: "star.fill")
+            .font(.system(size: size, weight: .bold))
+            .foregroundStyle(.yellow)
+            .accessibilityLabel("Starred")
+    }
+}
+
+/// Apple Music's "downloaded" mark: a small filled arrow in a circle.
+struct DownloadedMark: View {
+    var size: CGFloat = 12
+
+    var body: some View {
+        Image(systemName: "arrow.down.circle.fill")
+            .font(.system(size: size))
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Downloaded")
     }
 }

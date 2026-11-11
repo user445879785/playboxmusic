@@ -6,6 +6,11 @@ struct MusicSearchView: View {
     @State private var audioOnly = true
     @State private var sort: Sort = .best
     @State private var mode: Mode = .catalog
+    @State private var field: Field = .title
+    @State private var quality: SlskQuality?
+    @AppStorage("search.exactWords") private var exactWords = true
+    /// What was sent to Soulseek, which the filters match against.
+    @State private var submitted = ""
     @State private var albums: [ITunesItem] = []
     @State private var songs: [ITunesItem] = []
     @State private var catalogLoading = false
@@ -26,6 +31,15 @@ struct MusicSearchView: View {
         var id: String { rawValue }
     }
 
+    /// What the words should match: the song's file name, its album
+    /// folder, or anywhere (artist folders and names).
+    enum Field: String, CaseIterable, Identifiable {
+        case title = "Title"
+        case album = "Album"
+        case artist = "Artist"
+        var id: String { rawValue }
+    }
+
     enum Sort: String, CaseIterable, Identifiable {
         case best = "Best match"
         case quality = "Quality"
@@ -33,8 +47,24 @@ struct MusicSearchView: View {
         var id: String { rawValue }
     }
 
+    private func matches(_ result: SlskSearchResult) -> Bool {
+        if let quality, SlskQuality.of(result) != quality { return false }
+        let words = submitted
+        guard !words.isEmpty else { return true }
+        switch field {
+        case .title:
+            return SlskMatch.containsAll(words, in: result.title, exact: exactWords)
+        case .album:
+            let folders = result.filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: " ")
+            return SlskMatch.containsAll(words, in: folders, exact: exactWords)
+        case .artist:
+            return SlskMatch.containsAll(words, in: result.filename, exact: exactWords)
+        }
+    }
+
     private var visibleResults: [SlskSearchResult] {
-        let filtered = audioOnly ? client.results.filter(\.isAudio) : client.results
+        let base = audioOnly ? client.results.filter(\.isAudio) : client.results
+        let filtered = base.filter(matches)
         let sorted: [SlskSearchResult]
         switch sort {
         case .best:
@@ -79,17 +109,38 @@ struct MusicSearchView: View {
                 } else {
                     CatalogResultsView(albums: albums, songs: songs)
                 }
-            } else if !client.results.isEmpty || client.isSearching {
+            } else {
                 Section {
-                    ForEach(visibleResults) { result in
-                        ResultRow(result: result)
+                    VStack(spacing: 10) {
+                        Picker("Match", selection: $field) {
+                            ForEach(Field.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        QualityChips(selection: $quality, counts: qualityCounts)
                     }
-                } header: {
-                    HStack {
-                        Text("\(visibleResults.count) of \(client.results.count) files")
-                        if client.isSearching {
-                            Spacer()
-                            ProgressView().controlSize(.small)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                }
+                if !client.results.isEmpty || client.isSearching {
+                    Section {
+                        if field == .album {
+                            ForEach(folderGroups) { group in
+                                FolderRow(files: group.files)
+                            }
+                        } else {
+                            ForEach(visibleResults) { result in
+                                ResultRow(result: result)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text(field == .album
+                                 ? "\(folderGroups.count) albums · \(visibleResults.count) files"
+                                 : "\(visibleResults.count) of \(client.results.count) files")
+                            if client.isSearching {
+                                Spacer()
+                                ProgressView().controlSize(.small)
+                            }
                         }
                     }
                 }
@@ -117,7 +168,12 @@ struct MusicSearchView: View {
         .autocorrectionDisabled()
         .textInputAutocapitalization(.never)
         .onSubmit(of: .search) {
-            if mode == .soulseek { Task { await client.search(query) } } else { remember(query) }
+            if mode == .soulseek {
+                submitted = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                Task { await client.search(query) }
+            } else {
+                remember(query)
+            }
         }
         // The catalog is fast, so it searches as you type.
         .task(id: mode == .catalog ? query : "") {
@@ -149,6 +205,7 @@ struct MusicSearchView: View {
         .toolbar {
             Menu {
                 Toggle("Audio files only", isOn: $audioOnly)
+                Toggle("Whole words only", isOn: $exactWords)
                 Picker("Sort", selection: $sort) {
                     ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -159,6 +216,27 @@ struct MusicSearchView: View {
             .opacity(mode == .soulseek ? 1 : 0)
             .disabled(mode != .soulseek)
         }
+    }
+
+    private var qualityCounts: [SlskQuality: Int] {
+        let base = (audioOnly ? client.results.filter(\.isAudio) : client.results)
+        return Dictionary(grouping: base, by: SlskQuality.of).mapValues(\.count)
+    }
+
+    /// Album tab: matching files grouped into shared folders, biggest first.
+    private struct FolderGroup: Identifiable {
+        let id: String
+        let files: [SlskSearchResult]
+    }
+
+    private var folderGroups: [FolderGroup] {
+        let groups = Dictionary(grouping: visibleResults) { result -> String in
+            result.username + "\u{1F}" + result.filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: "/")
+        }
+        return groups.map { FolderGroup(id: $0.key, files: $0.value.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }) }
+            .sorted { $0.files.count > $1.files.count }
+            .prefix(100)
+            .map { $0 }
     }
 
     private static func qualityScore(_ result: SlskSearchResult) -> Double {
@@ -181,7 +259,10 @@ private struct ResultRow: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(result.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                HStack(spacing: 4) {
+                    Text(result.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                    if let transfer, case .completed = transfer.state { DownloadedMark() }
+                }
                 Text(result.folder).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 HStack(spacing: 6) {
                     Circle()
@@ -209,6 +290,82 @@ private struct ResultRow: View {
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Download")
+        }
+    }
+}
+
+/// "All" plus each quality that has results, with counts.
+private struct QualityChips: View {
+    @Binding var selection: SlskQuality?
+    let counts: [SlskQuality: Int]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                chip("All", count: counts.values.reduce(0, +), on: selection == nil) { selection = nil }
+                ForEach(SlskQuality.allCases) { quality in
+                    if let count = counts[quality], count > 0 {
+                        chip(quality.rawValue, count: count, on: selection == quality) {
+                            selection = selection == quality ? nil : quality
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .sensoryFeedback(.selection, trigger: selection)
+        .animation(.snappy, value: selection)
+    }
+
+    private func chip(_ title: String, count: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title).font(.caption.weight(.semibold))
+                if count > 0 { Text("\(count)").font(.caption2).monospacedDigit().opacity(0.7) }
+            }
+            .padding(.horizontal, 11).padding(.vertical, 7)
+            .background(on ? Color.brand.opacity(0.9) : Color.white.opacity(0.1), in: Capsule())
+            .foregroundStyle(on ? .black : .primary)
+        }
+        .buttonStyle(PressScaleStyle())
+    }
+}
+
+/// One shared album folder: name, sharer, quality, and Download All.
+private struct FolderRow: View {
+    @EnvironmentObject private var client: SoulseekClient
+    let files: [SlskSearchResult]
+    @State private var expanded = false
+
+    private var first: SlskSearchResult { files[0] }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(files) { ResultRow(result: $0) }
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(first.folder.isEmpty ? first.title : first.folder)
+                        .font(.subheadline.weight(.semibold)).lineLimit(2)
+                    HStack(spacing: 6) {
+                        Circle().fill(first.freeSlots ? Color.green : Color.orange).frame(width: 7, height: 7)
+                        Text(first.username).lineLimit(1)
+                        Text("· \(files.count) files · \(SlskQuality.of(first).rawValue)")
+                        Text("· " + ByteCountFormatter.string(fromByteCount: Int64(clamping: files.map(\.size).reduce(0, +)),
+                                                             countStyle: .file))
+                    }
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    for file in files { client.download(file, play: false) }
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                } label: {
+                    Image(systemName: "arrow.down.circle.fill").font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Download all \(files.count) files")
+            }
         }
     }
 }
