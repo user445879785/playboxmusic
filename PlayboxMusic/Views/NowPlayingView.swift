@@ -132,8 +132,9 @@ struct NowPlayingView: View {
     private var topBar: some View {
         HStack {
             Button { dismiss() } label: {
-                Image(systemName: "chevron.down").font(.headline).frame(width: 44, height: 44)
+                Image(systemName: "chevron.down").font(.headline).foregroundStyle(.white).frame(width: 44, height: 44)
             }
+            .buttonStyle(PressScaleStyle())
             .accessibilityLabel("Close Now Playing")
             Spacer()
             MixStatusPill(clock: player.clock) { sheet = .mix }
@@ -141,8 +142,12 @@ struct NowPlayingView: View {
             Menu {
                 coverMenu
             } label: {
-                Image(systemName: "ellipsis").font(.headline).frame(width: 44, height: 44)
+                Image(systemName: "ellipsis").font(.headline).foregroundStyle(.white).frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
+            // iOS 26 draws a bare Menu as an empty glass disc over this page.
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .accessibilityLabel("More")
         }
     }

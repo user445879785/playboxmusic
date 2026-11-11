@@ -164,7 +164,7 @@ struct MusicSearchView: View {
             }
         }
         .navigationTitle("Search")
-        .searchable(text: $query, prompt: "Artist, album or track")
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Artist, album or track")
         .autocorrectionDisabled()
         .textInputAutocapitalization(.never)
         .onSubmit(of: .search) {
