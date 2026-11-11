@@ -159,18 +159,20 @@ struct NowPlayingView: View {
             Button { sheet = .mix } label: { Label("Edit Transition", systemImage: "slider.horizontal.3") }
         }
         Button { toggleFavourite() } label: {
-            Label(isFavourite ? "Remove from Favourites" : "Add to Favourites",
-                  systemImage: isFavourite ? "heart.slash" : "heart")
+            Label(isFavourite ? "Unstar" : "Star", systemImage: isFavourite ? "star.slash" : "star")
         }
     }
 
     private var titleRow: some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(player.title)
-                    .font(.title2.weight(.bold))
-                    .tracking(-0.4)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(player.title)
+                        .font(.title2.weight(.bold))
+                        .tracking(-0.4)
+                        .lineLimit(1)
+                    if isFavourite { StarMark(size: 14) }
+                }
                 Text(player.subtitle)
                     .font(.body)
                     .foregroundStyle(.white.opacity(0.65))
@@ -185,14 +187,14 @@ struct NowPlayingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Button { toggleFavourite() } label: {
-                Image(systemName: isFavourite ? "heart.fill" : "heart")
+                Image(systemName: isFavourite ? "star.fill" : "star")
                     .font(.title2)
-                    .foregroundStyle(isFavourite ? Color.brand : .white.opacity(0.8))
+                    .foregroundStyle(isFavourite ? Color.yellow : .white.opacity(0.8))
                     .frame(width: 44, height: 44)
                     .symbolEffect(.bounce, value: isFavourite)
                     .contentTransition(.symbolEffect(.replace))
             }
-            .accessibilityLabel(isFavourite ? "Remove from Favourites" : "Add to Favourites")
+            .accessibilityLabel(isFavourite ? "Unstar" : "Star")
         }
         .animation(.snappy(duration: 0.35), value: player.current)
     }
@@ -442,9 +444,9 @@ private struct CoverView<MenuContent: View>: View {
                     radius: player.isPlaying ? 26 : 12, y: player.isPlaying ? 14 : 6)
             .animation(.easeInOut(duration: 0.3), value: player.artwork != nil)
 
-            Image(systemName: "heart.fill")
+            Image(systemName: "star.fill")
                 .font(.system(size: 90))
-                .foregroundStyle(.white)
+                .foregroundStyle(.yellow)
                 .shadow(radius: 10)
                 .scaleEffect(heartBurst ? 1 : 0.4)
                 .opacity(heartBurst ? 0.95 : 0)
@@ -492,7 +494,7 @@ private struct CoverView<MenuContent: View>: View {
         .contextMenu { coverMenu() }
         .accessibilityElement()
         .accessibilityLabel("Album artwork")
-        .accessibilityHint("Swipe left or right to change track. Double-tap to like.")
+        .accessibilityHint("Swipe left or right to change track. Double-tap to star.")
         .accessibilityAction(named: "Next track") { player.next() }
         .accessibilityAction(named: "Previous track") { player.previous() }
     }

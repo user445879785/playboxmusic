@@ -164,17 +164,7 @@ struct AlbumCarousel: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 14) {
                         ForEach(albums) { album in
-                            NavigationLink(value: album) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    CatalogArtwork(url: album.artworkURL(size: 400), size: 140)
-                                    Text(album.collectionName ?? "")
-                                        .font(.footnote.weight(.semibold)).lineLimit(1)
-                                    Text(album.artistName ?? "")
-                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                                .frame(width: 140, alignment: .leading)
-                            }
-                            .buttonStyle(.plain)
+                            AlbumTile(album: album)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -185,15 +175,93 @@ struct AlbumCarousel: View {
     }
 }
 
+/// An album cover in a carousel. Checked on Soulseek as it scrolls into
+/// view and left out when no one shares it.
+private struct AlbumTile: View {
+    @EnvironmentObject private var client: SoulseekClient
+    let album: ITunesItem
+
+    private var key: String { "album-\(album.id)" }
+
+    var body: some View {
+        if client.availability[key] != .unavailable {
+            NavigationLink(value: album) {
+                VStack(alignment: .leading, spacing: 4) {
+                    CatalogArtwork(url: album.artworkURL(size: 400), size: 140)
+                        .overlay(alignment: .bottomTrailing) {
+                            AvailabilityBadge(state: client.availability[key]).padding(6)
+                        }
+                    Text(album.collectionName ?? "")
+                        .font(.footnote.weight(.semibold)).lineLimit(1)
+                    Text(album.artistName ?? "")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .frame(width: 140, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .transition(.scale(scale: 0.85).combined(with: .opacity))
+            .task(id: client.isConnected) {
+                await client.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
+                                        trackCount: album.trackCount)
+            }
+        }
+    }
+}
+
+/// A tiny mark on covers and rows: spinner while checking, the best
+/// quality once found.
+struct AvailabilityBadge: View {
+    let state: SoulseekClient.Availability?
+
+    var body: some View {
+        switch state {
+        case .checking:
+            ProgressView().controlSize(.mini).tint(.white)
+                .padding(4).background(.ultraThinMaterial, in: Circle())
+        case .available(let qualities):
+            if let best = qualities.first, best <= .lossless {
+                Text(best == .hiRes ? "HI-RES" : "LOSSLESS")
+                    .font(.system(size: 8, weight: .heavy))
+                    .padding(.horizontal, 5).padding(.vertical, 3)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+        default:
+            EmptyView()
+        }
+    }
+}
+
 /// A song with cover, preview on tap, downloaded mark and GET button.
+/// Checked on Soulseek as it appears, and left out when no one shares it.
 struct SongRow: View {
     @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var client: SoulseekClient
     @ObservedObject private var preview = PreviewPlayer.shared
     let song: ITunesItem
     var leading: String?
     var showsArtwork = true
+    /// Off while an album page is still checking the whole album, which
+    /// answers for its songs without one search each.
+    var probe = true
+
+    private var key: String { "song-\(song.id)" }
 
     var body: some View {
+        if client.availability[key] == .unavailable && downloadedCopy == nil {
+            EmptyView()
+        } else {
+            row
+                .task(id: probe && client.isConnected) {
+                    guard probe, downloadedCopy == nil else { return }
+                    await client.checkSong(key: key, artist: song.artistName, title: song.trackName ?? "",
+                                           durationSeconds: song.durationSeconds)
+                }
+        }
+    }
+
+    private var downloadedCopy: Track? { library.downloaded(title: song.trackName, artist: song.artistName) }
+
+    private var row: some View {
         HStack(spacing: 12) {
             if let leading {
                 Text(leading)
@@ -217,10 +285,11 @@ struct SongRow: View {
                 HStack(spacing: 4) {
                     Text(song.trackName ?? "").font(.subheadline.weight(.semibold)).lineLimit(1)
                     if song.isExplicit { ExplicitBadge() }
-                    if library.has(title: song.trackName, artist: song.artistName) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.caption).foregroundStyle(.green)
-                            .accessibilityLabel("Downloaded")
+                    if let copy = downloadedCopy {
+                        if library.isFavourite(copy) { StarMark() }
+                        DownloadedMark()
+                    } else if case .checking = client.availability[key] {
+                        ProgressView().controlSize(.mini)
                     }
                 }
                 Text([song.artistName, showsArtwork ? song.collectionName : song.durationText]
@@ -241,7 +310,9 @@ struct SongRow: View {
 /// Album page modelled on the iTunes Store layout.
 struct AlbumDetailView: View {
     @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var client: SoulseekClient
     let album: ITunesItem
+    @State private var albumChecked = false
     @State private var tracks: [ITunesItem] = []
     @State private var moreByArtist: [ITunesItem] = []
     @State private var loading = true
@@ -257,7 +328,7 @@ struct AlbumDetailView: View {
             Section("Songs") {
                 if loading { ProgressView().frame(maxWidth: .infinity) }
                 ForEach(tracks) { track in
-                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false)
+                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false, probe: albumChecked)
                 }
             }
 
@@ -274,6 +345,16 @@ struct AlbumDetailView: View {
             tracks = songResults ?? []
             moreByArtist = (moreResults ?? []).filter { $0.collectionId != album.collectionId }.prefix(15).map { $0 }
             loading = false
+        }
+        .task(id: client.isConnected) {
+            // Check the album once, credit its songs from the same folders,
+            // then let any song still unknown look for itself.
+            let key = "album-\(album.id)"
+            await client.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
+                                    trackCount: album.trackCount)
+            while loading { try? await Task.sleep(for: .milliseconds(200)) }
+            client.adoptAlbumSongs(albumKey: key, songs: tracks.map { ("song-\($0.id)", $0.trackName ?? "") })
+            albumChecked = true
         }
     }
 
@@ -368,23 +449,23 @@ private struct GetSongButton: View {
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var player: MusicPlayer
     let song: ITunesItem
+    @State private var choosing = false
 
     private var key: String { "song-\(song.id)" }
 
     var body: some View {
+        button
+            .sheet(isPresented: $choosing) {
+                QualitySheet(kind: .song(song), key: key)
+                    .environmentObject(client)
+            }
+    }
+
+    private var button: some View {
         FetchButton(state: client.fetches[key], transfers: client.transfers, label: "GET") {
             guard client.isConnected else { return }
             PreviewPlayer.shared.stop()
-            Task {
-                await client.fetchSong(
-                    key: key,
-                    artist: song.artistName,
-                    title: song.trackName ?? "",
-                    durationSeconds: song.durationSeconds,
-                    meta: song.trackMeta(),
-                    play: true
-                )
-            }
+            choosing = true
         } onPlay: { url in
             library.reload()
             player.play([library.track(for: url)], startAt: 0)
@@ -398,24 +479,29 @@ private struct GetAlbumButton: View {
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var player: MusicPlayer
     let album: ITunesItem
+    @State private var choosing = false
 
     private var key: String { "album-\(album.id)" }
 
     var body: some View {
+        Group {
+            if client.availability[key] == .unavailable {
+                Label("Not shared on Soulseek right now", systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                button
+            }
+        }
+        .sheet(isPresented: $choosing) {
+            QualitySheet(kind: .album(album), key: key)
+                .environmentObject(client)
+        }
+    }
+
+    private var button: some View {
         FetchButton(state: client.fetches[key], transfers: client.transfers, label: "GET ALBUM") {
             guard client.isConnected else { return }
-            var meta = album.trackMeta()
-            meta.title = album.collectionName ?? ""
-            Task {
-                await client.fetchAlbum(
-                    key: key,
-                    artist: album.artistName,
-                    album: album.collectionName ?? "",
-                    trackCount: album.trackCount,
-                    meta: meta,
-                    play: true
-                )
-            }
+            choosing = true
         } onPlay: { url in
             library.reload()
             player.play([library.track(for: url)], startAt: 0)

@@ -8,24 +8,49 @@ struct MusicContentView: View {
     @AppStorage("playbox.music.username") private var username = ""
     @StateObject private var updater = UpdateChecker()
 
+    @ObservedObject private var look = Appearance.shared
+    @State private var tab = "search"
+    /// Tabs are built the first time they're opened, then kept alive so
+    /// each keeps its scroll position and navigation.
+    @State private var opened: Set<String> = ["search"]
+
+    private var tabs: [ChromeTab] {
+        [
+            ChromeTab(id: "search", title: "Search", symbol: "magnifyingglass"),
+            ChromeTab(id: "downloads", title: "Downloads", symbol: "arrow.down.circle",
+                      badge: client.transfers.filter(\.state.isActive).count),
+            ChromeTab(id: "library", title: "Library", symbol: "music.note.list"),
+            ChromeTab(id: "settings", title: "Settings", symbol: "gearshape")
+        ]
+    }
+
     var body: some View {
-        TabView {
-            NavigationStack { MusicSearchView() }
-                .withMiniPlayer()
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-
-            NavigationStack { DownloadsView() }
-                .withMiniPlayer()
-                .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
-                .badge(client.transfers.filter(\.state.isActive).count)
-
-            NavigationStack { MusicLibraryView() }
-                .withMiniPlayer()
-                .tabItem { Label("Library", systemImage: "music.note.list") }
-
-            NavigationStack { MusicAccountView() }
-                .tabItem { Label("Account", systemImage: "person.crop.circle") }
+        let dockHeight = ChromeDock.baseHeight * look.dockScale
+        let safeBottom = Self.deviceBottomInset
+        let bottom = max(safeBottom - 8, 10)
+        ZStack {
+            page("search") { NavigationStack { MusicSearchView() }.withMiniPlayer() }
+            page("downloads") { NavigationStack { DownloadsView() }.withMiniPlayer() }
+            page("library") { NavigationStack { MusicLibraryView() }.withMiniPlayer() }
+            page("settings") { NavigationStack { MusicAccountView() } }
         }
+        // Content scrolls under the glass; the last row and the mini player clear it.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: max(0, dockHeight + bottom - safeBottom + 6))
+        }
+        .overlay(alignment: .bottom) {
+            GlassDock(tabs: tabs, selection: $tab, accent: look.accentUIColor,
+                      transparency: look.dockTransparency, scale: look.dockScale)
+                .frame(height: dockHeight)
+                .padding(.horizontal, 14)
+                .padding(.bottom, bottom)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                // Sits on the screen's edge and stays put (behind) when the keyboard opens.
+                .ignoresSafeArea(edges: .bottom)
+        }
+        // A new accent repaints every screen.
+        .id(look.accentHex)
+        .onChange(of: tab) { _, new in opened.insert(new) }
         .preferredColorScheme(.dark)
         .tint(.brand)
         .environmentObject(updater)
@@ -60,6 +85,20 @@ struct MusicContentView: View {
         }
     }
 
+    private static var deviceBottomInset: CGFloat {
+        (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.bottom ?? 34
+    }
+
+    @ViewBuilder
+    private func page<Content: View>(_ id: String, @ViewBuilder _ content: () -> Content) -> some View {
+        if opened.contains(id) {
+            content()
+                .opacity(tab == id ? 1 : 0)
+                .allowsHitTesting(tab == id)
+                .accessibilityHidden(tab != id)
+        }
+    }
+
     /// Sockets do not survive long suspensions; sign back in on return.
     private func reconnectIfNeeded() async {
         switch client.connectionState {
@@ -72,7 +111,7 @@ struct MusicContentView: View {
 }
 
 /// Floating mini player tinted from the artwork: swipe for next/previous,
-/// swipe up or tap to open, heart, play and a progress line.
+/// swipe up or tap to open, star, play and a progress line.
 private struct MiniPlayerInset: ViewModifier {
     @EnvironmentObject private var player: MusicPlayer
     @EnvironmentObject private var library: MusicLibrary
@@ -130,12 +169,12 @@ private struct MiniPlayerInset: ViewModifier {
                 library.setFavourite(track, !liked)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             } label: {
-                Image(systemName: liked ? "heart.fill" : "heart")
-                    .foregroundStyle(liked ? Color.brand : .white.opacity(0.85))
+                Image(systemName: liked ? "star.fill" : "star")
+                    .foregroundStyle(liked ? Color.yellow : .white.opacity(0.85))
                     .frame(width: 38, height: 44)
                     .contentTransition(.symbolEffect(.replace))
             }
-            .accessibilityLabel(liked ? "Remove from Favourites" : "Add to Favourites")
+            .accessibilityLabel(liked ? "Unstar" : "Star")
             Button { player.togglePlayback() } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title3)

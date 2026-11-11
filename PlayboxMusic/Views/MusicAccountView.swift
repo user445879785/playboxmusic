@@ -9,6 +9,8 @@ struct MusicAccountView: View {
 
     var body: some View {
         Form {
+            AppearanceSection()
+
             Section {
                 TextField("Username", text: $username)
                     .textContentType(.username)
@@ -56,7 +58,7 @@ struct MusicAccountView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Account")
+        .navigationTitle("Settings")
         .sheet(isPresented: $showEqualizer) { EqualizerView().environmentObject(player) }
         .onAppear {
             if password.isEmpty, !username.isEmpty {
