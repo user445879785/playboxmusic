@@ -441,8 +441,8 @@ final class EqualizerSettings: ObservableObject {
     var activeCurve: [Float] {
         if let savedMatch { return savedMatch.gains }
         switch mode {
-        case .manual: gains
-        case .auto: (autoResult?.gains ?? Array(repeating: 0, count: 10)).map { $0 * Float(autoIntensity) }
+        case .manual: return gains
+        case .auto: return (autoResult?.gains ?? Array(repeating: 0, count: 10)).map { $0 * Float(autoIntensity) }
         }
     }
 
