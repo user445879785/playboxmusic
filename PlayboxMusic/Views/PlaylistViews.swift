@@ -140,6 +140,13 @@ struct PlaylistView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        // The same song can be in a playlist as often as you like.
+                        .swipeActions(edge: .leading) {
+                            Button { library.add([track], to: id) } label: {
+                                Label("Duplicate", systemImage: "plus.square.on.square")
+                            }
+                            .tint(.brand)
+                        }
                     }
                     .onDelete { library.removeFromPlaylist(id, at: $0) }
                     .onMove { library.movePlaylistItems(id, from: $0, to: $1) }
