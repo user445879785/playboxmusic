@@ -18,6 +18,7 @@ struct NowPlayingView: View {
     @State private var sheet: Sheet?
     @State private var lyricsFrame: CGRect?
     @StateObject private var swipe = SwipeDownState()
+    @State private var namingPlaylist = false
     @State private var showLyrics = false
     @State private var lyrics: [LyricLine] = []
     @State private var lyricsLoading = false
@@ -89,6 +90,7 @@ struct NowPlayingView: View {
         .background { backdrop }
         .foregroundStyle(.white)
         .modifier(SwipeDownPage(swipe: swipe))
+        .modifier(NewPlaylistAlert(isPresented: $namingPlaylist, track: player.current))
         .preferredColorScheme(.dark)
         .presentationBackground(.clear)
         .overlay(alignment: .top) { noticeBanner }
@@ -164,6 +166,7 @@ struct NowPlayingView: View {
         if let track = player.current {
             Button { player.playNext(track) } label: { Label("Play Again Next", systemImage: "text.insert") }
             Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
+            AddToPlaylistMenu(track: track) { namingPlaylist = true }
         }
         Button { sheet = .queue } label: { Label("Up Next", systemImage: "list.bullet") }
         if player.upcoming != nil {

@@ -58,6 +58,7 @@ struct CatalogHomeView: View {
                     .padding(.horizontal, 16)
                 }
                 .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                .listRowBackground(Color.clear)
             }
         }
 
@@ -170,42 +171,30 @@ struct AlbumCarousel: View {
                     .padding(.horizontal, 16)
                 }
                 .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                // No grey card behind the covers: it didn't line up with them.
+                .listRowBackground(Color.clear)
             }
         }
     }
 }
 
-/// An album cover in a carousel. Checked on Soulseek as it scrolls into
-/// view and left out when no one shares it.
+/// An album cover in a carousel. Soulseek is only searched when you tap
+/// GET on the album, never while browsing.
 private struct AlbumTile: View {
-    @Environment(\.soulseek) private var client
-    @EnvironmentObject private var checks: CatalogChecks
     let album: ITunesItem
 
-    private var key: String { "album-\(album.id)" }
-
     var body: some View {
-        if checks.states[key] != .unavailable {
-            NavigationLink(value: album) {
-                VStack(alignment: .leading, spacing: 4) {
-                    CatalogArtwork(url: album.artworkURL(size: 400), size: 140)
-                        .overlay(alignment: .bottomTrailing) {
-                            AvailabilityBadge(state: checks.states[key]).padding(6)
-                        }
-                    Text(album.collectionName ?? "")
-                        .font(.footnote.weight(.semibold)).lineLimit(1)
-                    Text(album.artistName ?? "")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .frame(width: 140, alignment: .leading)
+        NavigationLink(value: album) {
+            VStack(alignment: .leading, spacing: 4) {
+                CatalogArtwork(url: album.artworkURL(size: 400), size: 140)
+                Text(album.collectionName ?? "")
+                    .font(.footnote.weight(.semibold)).lineLimit(1)
+                Text(album.artistName ?? "")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            .buttonStyle(.plain)
-            .transition(.scale(scale: 0.85).combined(with: .opacity))
-            .task(id: checks.connected) {
-                await client?.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
-                                         trackCount: album.trackCount)
-            }
+            .frame(width: 140, alignment: .leading)
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -236,34 +225,15 @@ struct AvailabilityBadge: View {
 /// Checked on Soulseek as it appears, and left out when no one shares it.
 struct SongRow: View {
     @EnvironmentObject private var library: MusicLibrary
-    @Environment(\.soulseek) private var client
-    @EnvironmentObject private var checks: CatalogChecks
     @ObservedObject private var preview = PreviewPlayer.shared
     let song: ITunesItem
     var leading: String?
     var showsArtwork = true
-    /// Off while an album page is still checking the whole album, which
-    /// answers for its songs without one search each.
-    var probe = true
-    /// Search and charts leave out songs no one shares. An album page keeps
-    /// every row (dimmed) so the list doesn't shift while you scroll.
-    var hidesUnavailable = true
 
-    private var key: String { "song-\(song.id)" }
-    private var unavailable: Bool { checks.states[key] == .unavailable && downloadedCopy == nil }
-
+    // Soulseek is searched only when you tap GET, so browsing and search
+    // results never start background searches.
     var body: some View {
-        if unavailable && hidesUnavailable {
-            EmptyView()
-        } else {
-            row
-                .opacity(unavailable ? 0.4 : 1)
-                .task(id: probe && checks.connected) {
-                    guard probe, downloadedCopy == nil else { return }
-                    await client?.checkSong(key: key, artist: song.artistName, title: song.trackName ?? "",
-                                            durationSeconds: song.durationSeconds)
-                }
-        }
+        row
     }
 
     private var downloadedCopy: Track? { library.downloaded(title: song.trackName, artist: song.artistName) }
@@ -295,10 +265,6 @@ struct SongRow: View {
                     if let copy = downloadedCopy {
                         if library.isFavourite(copy) { StarMark() }
                         DownloadedMark()
-                    } else if case .checking = checks.states[key] {
-                        ProgressView().controlSize(.mini)
-                    } else if unavailable {
-                        Text("Not shared").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
                 Text([song.artistName, showsArtwork ? song.collectionName : song.durationText]
@@ -306,7 +272,7 @@ struct SongRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
-            if !unavailable { GetSongButton(song: song) }
+            GetSongButton(song: song)
         }
         .contentShape(Rectangle())
         .onTapGesture { PreviewPlayer.shared.toggle(song) }
@@ -321,7 +287,6 @@ struct AlbumDetailView: View {
     @EnvironmentObject private var library: MusicLibrary
     @EnvironmentObject private var client: SoulseekClient
     let album: ITunesItem
-    @State private var albumChecked = false
     @State private var tracks: [ITunesItem] = []
     @State private var moreByArtist: [ITunesItem] = []
     @State private var loading = true
@@ -337,8 +302,7 @@ struct AlbumDetailView: View {
             Section("Songs") {
                 if loading { ProgressView().frame(maxWidth: .infinity) }
                 ForEach(tracks) { track in
-                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false, probe: albumChecked,
-                            hidesUnavailable: false)
+                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false)
                 }
             }
 
@@ -356,16 +320,7 @@ struct AlbumDetailView: View {
             moreByArtist = (moreResults ?? []).filter { $0.collectionId != album.collectionId }.prefix(15).map { $0 }
             loading = false
         }
-        .task(id: client.isConnected) {
-            // Check the album once, credit its songs from the same folders,
-            // then let any song still unknown look for itself.
-            let key = "album-\(album.id)"
-            await client.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
-                                    trackCount: album.trackCount)
-            while loading { try? await Task.sleep(for: .milliseconds(200)) }
-            client.adoptAlbumSongs(albumKey: key, songs: tracks.map { ("song-\($0.id)", $0.trackName ?? "") })
-            albumChecked = true
-        }
+
     }
 
     private func otherAlbums() async -> [ITunesItem]? {

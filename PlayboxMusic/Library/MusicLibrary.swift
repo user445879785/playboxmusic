@@ -20,6 +20,14 @@ struct TrackMeta: Codable, Hashable, Sendable {
     var artworkURL: URL?
 }
 
+/// A list of songs you made, saved by each song's place in the library.
+struct Playlist: Codable, Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var items: [String]
+    var created: Date
+}
+
 /// Lists audio files downloaded into Documents/Music (also visible in the Files app).
 @MainActor
 final class MusicLibrary: ObservableObject {
@@ -30,7 +38,10 @@ final class MusicLibrary: ObservableObject {
     @Published private(set) var snoozed: [String: Double] = [:]
     /// Hidden songs: never played automatically until un-hidden.
     @Published private(set) var hidden: Set<String> = []
+    @Published private(set) var playlists: [Playlist] = []
     let root: URL
+
+    private var playlistsURL: URL { root.appendingPathComponent(".playbox-playlists.json") }
 
     private var metadataURL: URL { root.appendingPathComponent(".playbox-metadata.json") }
 
@@ -47,6 +58,10 @@ final class MusicLibrary: ObservableObject {
         snoozed = (UserDefaults.standard.dictionary(forKey: "music.snoozed") as? [String: Double] ?? [:])
             .filter { $0.value > now }
         hidden = Set(UserDefaults.standard.stringArray(forKey: "music.hidden") ?? [])
+        if let data = try? Data(contentsOf: playlistsURL),
+           let saved = try? JSONDecoder().decode([Playlist].self, from: data) {
+            playlists = saved
+        }
         reload()
     }
 
@@ -58,6 +73,64 @@ final class MusicLibrary: ObservableObject {
         let id = key(for: track.url)
         if value { favourites.insert(id) } else { favourites.remove(id) }
         UserDefaults.standard.set(Array(favourites), forKey: "music.favourites")
+    }
+
+    // MARK: Playlists
+
+    @discardableResult
+    func createPlaylist(_ name: String, with tracks: [Track] = []) -> Playlist {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let playlist = Playlist(id: UUID(), name: trimmed.isEmpty ? "New Playlist" : trimmed,
+                                items: tracks.map { key(for: $0.url) }, created: Date())
+        playlists.insert(playlist, at: 0)
+        savePlaylists()
+        return playlist
+    }
+
+    func renamePlaylist(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = playlists.firstIndex(where: { $0.id == id }) else { return }
+        playlists[index].name = trimmed
+        savePlaylists()
+    }
+
+    func deletePlaylist(_ id: UUID) {
+        playlists.removeAll { $0.id == id }
+        savePlaylists()
+    }
+
+    func add(_ tracks: [Track], to id: UUID) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
+        playlists[index].items += tracks.map { key(for: $0.url) }
+        savePlaylists()
+    }
+
+    func removeFromPlaylist(_ id: UUID, at offsets: IndexSet) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
+        playlists[index].items.remove(atOffsets: offsets)
+        savePlaylists()
+    }
+
+    func movePlaylistItems(_ id: UUID, from source: IndexSet, to destination: Int) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
+        playlists[index].items.move(fromOffsets: source, toOffset: destination)
+        savePlaylists()
+    }
+
+    /// A playlist's songs that are still in the library, in order.
+    func tracks(in playlist: Playlist) -> [Track] {
+        let byKey = Dictionary(tracks.map { (key(for: $0.url), $0) }, uniquingKeysWith: { first, _ in first })
+        return playlist.items.compactMap { byKey[$0] }
+    }
+
+    func contains(_ track: Track, in playlist: Playlist) -> Bool {
+        playlist.items.contains(key(for: track.url))
+    }
+
+    private func savePlaylists() {
+        if let data = try? JSONEncoder().encode(playlists) {
+            try? data.write(to: playlistsURL, options: .atomic)
+        }
     }
 
     // MARK: Snooze and hide

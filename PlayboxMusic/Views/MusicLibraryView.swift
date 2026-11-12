@@ -6,6 +6,8 @@ struct MusicLibraryView: View {
     @State private var filter = ""
     @State private var importing = false
     @State private var importedCount: Int?
+    @State private var namingPlaylist = false
+    @State private var newPlaylistTrack: Track?
 
     private var visible: [Track] {
         let needle = filter.trimmingCharacters(in: .whitespaces)
@@ -22,6 +24,9 @@ struct MusicLibraryView: View {
                 LibraryHeader(mix: player.mix, tracks: library.tracks)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     .listRowSeparator(.hidden)
+            }
+            if filter.isEmpty {
+                PlaylistsSection()
             }
             if filter.isEmpty, !library.favouriteTracks.isEmpty {
                 Section("Starred") {
@@ -98,6 +103,20 @@ struct MusicLibraryView: View {
                     }
                 }
                 .opacity(library.isSkipped(track) ? 0.5 : 1)
+                .contextMenu {
+                    Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
+                    Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
+                    AddToPlaylistMenu(track: track) {
+                        newPlaylistTrack = track
+                        namingPlaylist = true
+                    }
+                    Button {
+                        library.setFavourite(track, !library.isFavourite(track))
+                    } label: {
+                        Label(library.isFavourite(track) ? "Unstar" : "Star",
+                              systemImage: library.isFavourite(track) ? "star.slash" : "star")
+                    }
+                }
             }
         }
         .overlay {
@@ -148,6 +167,8 @@ struct MusicLibraryView: View {
         .sensoryFeedback(.success, trigger: importedCount) { _, new in (new ?? 0) > 0 }
         .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: "Filter library")
         .navigationTitle("Library")
+        .navigationDestination(for: Playlist.self) { PlaylistView(id: $0.id) }
+        .modifier(NewPlaylistAlert(isPresented: $namingPlaylist, track: newPlaylistTrack))
         .refreshable { library.reload() }
         .onAppear { library.reload() }
     }
