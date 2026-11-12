@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SwiftUI
 import UIKit
@@ -13,12 +14,29 @@ enum CrashLog {
     private static let file = folder.appendingPathComponent("crash.txt")
     private static var path = ""
     private static let liveKey = "diagnostics.sessionLive"
+    // A crash handler may only do the simplest things: no memory, no locks.
+    // So the file is opened and the first line prepared at launch, and the
+    // handler only writes bytes to it. (It used to build strings and touch
+    // settings, which could freeze the app instead of saving the report.)
+    private static let liveFile = folder.appendingPathComponent("crash-live.txt")
+    private static var liveFD: Int32 = -1
+    private static var header: [UInt8] = []
+    private static let frames = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: 64)
+    private static var reported = false
     private static let backgroundKey = "diagnostics.inBackground"
 
     /// Call once at launch.
     static func install() {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         path = file.path
+        // A report the last run left behind becomes the one shown in Settings.
+        if let size = try? FileManager.default.attributesOfItem(atPath: liveFile.path)[.size] as? UInt64, size > 0 {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.moveItem(at: liveFile, to: file)
+        }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        header = Array("Playbox Music \(version), iOS \(UIDevice.current.systemVersion), started \(Date())\nSignal ".utf8)
+        liveFD = open(liveFile.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         let defaults = UserDefaults.standard
         // The last run was killed while active and left no crash report: a hang.
         if defaults.bool(forKey: liveKey), !defaults.bool(forKey: backgroundKey),
@@ -35,7 +53,15 @@ enum CrashLog {
         }
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE] {
             signal(sig) { number in
-                CrashLog.write("Signal \(number)", stack: Thread.callStackSymbols)
+                let fd = CrashLog.liveFD
+                if fd >= 0, !CrashLog.reported {
+                    CrashLog.reported = true
+                    CrashLog.header.withUnsafeBufferPointer { _ = Darwin.write(fd, $0.baseAddress, $0.count) }
+                    var digits: (UInt8, UInt8, UInt8) = (48 + UInt8(number / 10 % 10), 48 + UInt8(number % 10), 10)
+                    withUnsafeBytes(of: &digits) { _ = Darwin.write(fd, $0.baseAddress, 3) }
+                    let count = backtrace(CrashLog.frames, 64)
+                    backtrace_symbols_fd(CrashLog.frames, count, fd)
+                }
                 signal(number, SIG_DFL)
                 raise(number)
             }
@@ -53,6 +79,8 @@ enum CrashLog {
             + stack.joined(separator: "\n") + "\n"
         FileManager.default.createFile(atPath: path, contents: text.data(using: .utf8))
         UserDefaults.standard.set(false, forKey: liveKey)
+        // The abort that follows an exception has nothing to add.
+        reported = true
     }
 
     static var lastReport: String? {

@@ -28,7 +28,6 @@ struct GlassDock: View {
     /// 0.8 … 1.25.
     let scale: Double
 
-    @Namespace private var bubble
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -44,13 +43,27 @@ struct GlassDock: View {
                     .accessibilityAddTraits(selection == tab.id ? .isSelected : [])
             }
         }
+        // One bubble that slides under the tabs. (A bubble per tab, morphed
+        // from one to the next, made Liquid Glass rebuild it on every switch,
+        // which is what felt slow.)
+        .background {
+            GeometryReader { proxy in
+                let gap = 2 * scale
+                let count = CGFloat(max(tabs.count, 1))
+                let width = (proxy.size.width - gap * (count - 1)) / count
+                let index = CGFloat(tabs.firstIndex { $0.id == selection } ?? 0)
+                pill
+                    .frame(width: width, height: proxy.size.height)
+                    .offset(x: index * (width + gap))
+            }
+        }
         .padding(inset)
         .frame(height: Self.baseHeight * scale)
         .background { capsule }
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
         // Only the dock animates. Wrapping the tab change itself in an
         // animation made the page you switch to animate in as well.
-        .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.28, dampingFraction: 0.78),
+        .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.2, dampingFraction: 0.86),
                    value: selection)
         .sensoryFeedback(.selection, trigger: selection)
     }
@@ -86,11 +99,6 @@ struct GlassDock: View {
         }
         .foregroundStyle(selected ? accent : .primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            if selected {
-                pill.matchedGeometryEffect(id: "bubble", in: bubble)
-            }
-        }
         .contentShape(Capsule())
         .animation(.snappy, value: tab.badge)
     }
@@ -150,6 +158,6 @@ private struct DockPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.9 : 1)
-            .animation(.easeOut(duration: 0.18), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }

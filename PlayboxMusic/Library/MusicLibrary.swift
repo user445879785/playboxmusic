@@ -2,9 +2,17 @@ import Combine
 import Foundation
 import Security
 
+/// A passage of a song: only this part plays (seconds from the start).
+struct Clip: Hashable, Sendable {
+    var start: Double
+    var end: Double
+}
+
 struct Track: Identifiable, Hashable, Sendable {
     let url: URL
     let addedAt: Date
+    /// Set when a playlist entry is limited to one passage of the song.
+    var clip: Clip? = nil
 
     var id: URL { url }
     var title: String { url.deletingPathExtension().lastPathComponent }
@@ -174,13 +182,54 @@ final class MusicLibrary: ObservableObject {
 
     func add(_ tracks: [Track], to id: UUID) {
         guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
-        playlists[index].items += tracks.map { key(for: $0.url) }
+        playlists[index].items += tracks.map { Self.item(key(for: $0.url), $0.clip) }
         savePlaylists()
     }
 
     func removeFromPlaylist(_ id: UUID, at offsets: IndexSet) {
         guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
-        playlists[index].items.remove(atOffsets: offsets)
+        let places = shownPlaces(in: playlists[index])
+        playlists[index].items.remove(atOffsets: IndexSet(offsets.compactMap { places[safe: $0] }))
+        savePlaylists()
+    }
+
+    // A playlist entry is the song's key, optionally followed by a passage
+    // ("key␟12.5-48.0"). Old playlists, which hold plain keys, read the same.
+    private static let clipMark: Character = "\u{1F}"
+
+    private static func item(_ key: String, _ clip: Clip?) -> String {
+        guard let clip else { return key }
+        return key + String(clipMark) + "\(clip.start)-\(clip.end)"
+    }
+
+    private static func split(_ item: String) -> (key: String, clip: Clip?) {
+        guard let mark = item.firstIndex(of: clipMark) else { return (item, nil) }
+        let numbers = item[item.index(after: mark)...].split(separator: "-").compactMap { Double($0) }
+        let clip = numbers.count == 2 && numbers[1] > numbers[0] ? Clip(start: numbers[0], end: numbers[1]) : nil
+        return (String(item[..<mark]), clip)
+    }
+
+    /// Where each song shown in a playlist sits in its saved list (entries
+    /// whose file is gone are not shown).
+    private func shownPlaces(in playlist: Playlist) -> [Int] {
+        let known = Set(tracks.map { key(for: $0.url) })
+        return playlist.items.indices.filter { known.contains(Self.split(playlist.items[$0]).key) }
+    }
+
+    /// Adds a second copy of an entry right after it, passage included.
+    func duplicateInPlaylist(_ id: UUID, at offset: Int) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }),
+              let place = shownPlaces(in: playlists[index])[safe: offset] else { return }
+        playlists[index].items.insert(playlists[index].items[place], at: place + 1)
+        savePlaylists()
+    }
+
+    /// Limits an entry to one passage of its song, or back to the whole song.
+    func setClip(_ clip: Clip?, in id: UUID, at offset: Int) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }),
+              let place = shownPlaces(in: playlists[index])[safe: offset] else { return }
+        let key = Self.split(playlists[index].items[place]).key
+        playlists[index].items[place] = Self.item(key, clip)
         savePlaylists()
     }
 
@@ -193,11 +242,17 @@ final class MusicLibrary: ObservableObject {
     /// A playlist's songs that are still in the library, in order.
     func tracks(in playlist: Playlist) -> [Track] {
         let byKey = Dictionary(tracks.map { (key(for: $0.url), $0) }, uniquingKeysWith: { first, _ in first })
-        return playlist.items.compactMap { byKey[$0] }
+        return playlist.items.compactMap { item -> Track? in
+            let entry = Self.split(item)
+            guard var track = byKey[entry.key] else { return nil }
+            track.clip = entry.clip
+            return track
+        }
     }
 
     func contains(_ track: Track, in playlist: Playlist) -> Bool {
-        playlist.items.contains(key(for: track.url))
+        let wanted = key(for: track.url)
+        return playlist.items.contains { Self.split($0).key == wanted }
     }
 
     private func savePlaylists() {

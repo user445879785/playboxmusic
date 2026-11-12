@@ -91,6 +91,7 @@ struct PlaylistView: View {
     @State private var renaming = false
     @State private var name = ""
     @State private var adding = false
+    @State private var passage: PassageTarget?
 
     private var playlist: Playlist? { library.playlists.first { $0.id == id } }
 
@@ -135,17 +136,43 @@ struct PlaylistView: View {
                                             .foregroundStyle(player.current == track ? Color.brand : .primary)
                                         if library.isFavourite(track) { StarMark() }
                                     }
-                                    Text(library.subtitle(of: track)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    if let clip = track.clip {
+                                        Label("\(TrackFacts.format(clip.start)) – \(TrackFacts.format(clip.end))",
+                                              systemImage: "scissors")
+                                            .font(.caption.weight(.semibold)).foregroundStyle(Color.brand).lineLimit(1)
+                                    } else {
+                                        Text(library.subtitle(of: track)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
                                 }
+                                Spacer(minLength: 0)
                             }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        // The same song can be in a playlist as often as you like.
+                        // The same song (or the same passage) can be in a
+                        // playlist as often as you like.
                         .swipeActions(edge: .leading) {
-                            Button { library.add([track], to: id) } label: {
+                            Button { library.duplicateInPlaylist(id, at: offset) } label: {
                                 Label("Duplicate", systemImage: "plus.square.on.square")
                             }
                             .tint(.brand)
+                            Button { passage = PassageTarget(offset: offset, track: track) } label: {
+                                Label("Passage", systemImage: "scissors")
+                            }
+                            .tint(.indigo)
+                        }
+                        .contextMenu {
+                            Button { passage = PassageTarget(offset: offset, track: track) } label: {
+                                Label(track.clip == nil ? "Play Only a Passage…" : "Change Passage…", systemImage: "scissors")
+                            }
+                            Button { library.duplicateInPlaylist(id, at: offset) } label: {
+                                Label("Duplicate", systemImage: "plus.square.on.square")
+                            }
+                            if track.clip != nil {
+                                Button { library.setClip(nil, in: id, at: offset) } label: {
+                                    Label("Play the Whole Song", systemImage: "arrow.left.and.right")
+                                }
+                            }
                         }
                     }
                     .onDelete { library.removeFromPlaylist(id, at: $0) }
@@ -186,8 +213,98 @@ struct PlaylistView: View {
                 AddSongsSheet(playlistID: id)
                     .environmentObject(library)
             }
+            .sheet(item: $passage) { target in
+                PassageSheet(track: target.track, title: library.title(of: target.track)) { clip in
+                    library.setClip(clip, in: id, at: target.offset)
+                }
+                .environmentObject(player)
+            }
         } else {
             ContentUnavailableView("Playlist deleted", systemImage: "music.note.list")
+        }
+    }
+}
+
+/// Which playlist entry the passage sheet is editing.
+struct PassageTarget: Identifiable {
+    let offset: Int
+    let track: Track
+    var id: Int { offset }
+}
+
+/// Limits a playlist entry to one passage of its song (a verse, a hook):
+/// pick where it starts and ends, listen, save. Duplicate the entry to hear
+/// the passage twice, or turn on Repeat One to loop it.
+private struct PassageSheet: View {
+    @EnvironmentObject private var player: MusicPlayer
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    let title: String
+    let onSave: (Clip?) -> Void
+    @State private var duration: Double = 0
+    @State private var start: Double = 0
+    @State private var end: Double = 0
+
+    private var playingThis: Bool { player.current == track }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if duration <= 0 {
+                    ProgressView()
+                } else {
+                    Section("Starts at \(TrackFacts.format(start))") {
+                        Slider(value: $start, in: 0...max(1, duration - 1), step: 0.5)
+                        if playingThis {
+                            Button("Start Where the Song Is Now") {
+                                start = min(player.clock.elapsed(at: Date()), duration - 1)
+                            }
+                        }
+                    }
+                    Section("Ends at \(TrackFacts.format(end))") {
+                        Slider(value: $end, in: 1...max(2, duration), step: 0.5)
+                        if playingThis {
+                            Button("End Where the Song Is Now") {
+                                end = max(1, player.clock.elapsed(at: Date()))
+                            }
+                        }
+                    }
+                    Section {
+                        Button {
+                            var preview = track
+                            preview.clip = Clip(start: start, end: max(end, start + 1))
+                            player.play([preview], startAt: 0)
+                        } label: { Label("Listen to the Passage", systemImage: "play.fill") }
+                        if track.clip != nil {
+                            Button("Play the Whole Song Again", role: .destructive) {
+                                onSave(nil)
+                                dismiss()
+                            }
+                        }
+                    } footer: {
+                        Text("Only this part plays in the playlist. Duplicate the entry to hear it twice, or use Repeat One to loop it.")
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(Clip(start: start, end: max(end, start + 1)))
+                        dismiss()
+                    }
+                    .disabled(duration <= 0)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .task {
+            let length = await TrackAnalyzer.shared.duration(for: track.url) ?? 0
+            start = track.clip?.start ?? 0
+            end = min(track.clip?.end ?? length, length)
+            duration = length
         }
     }
 }

@@ -551,8 +551,9 @@ final class MusicPlayer: ObservableObject {
 
     func previous() {
         cancelMix()
-        if elapsed > 3 || index == 0 {
-            seek(to: 0)
+        let top = current?.clip?.start ?? 0
+        if elapsed - top > 3 || index == 0 {
+            seek(to: duration > 0 ? top / duration : 0)
         } else {
             skipDirection = -1
             index -= 1
@@ -697,7 +698,9 @@ final class MusicPlayer: ObservableObject {
                       let self, self.current == track, self.mixPlan == nil else { return }
                 if self.mix.matchVolume { self.deck.trim.globalGain = self.mix.loudnessTrims(analysis, nil).0 }
             }
-            deck.play(from: seconds) { [weak self] in self?.trackEnded() }
+            // A passage starts at its own beginning, not the song's.
+            let begin = seconds > 0 ? seconds : (track.clip?.start ?? 0)
+            deck.play(from: begin) { [weak self] in self?.trackEnded() }
         } catch {
             // AVFoundation cannot read this format; let VLC try.
             guard startVLC(track.url) else {
@@ -801,6 +804,20 @@ final class MusicPlayer: ObservableObject {
         guard vlc == nil, repeatMode != .one, let from = current, let to = upcoming,
               Self.engineReadable(to.url) else { return }
         let outDuration = deck.duration
+        if from.clip != nil || to.clip != nil {
+            // Passages are cut exactly: this one ends on its last sample
+            // and the next entry starts where its own passage begins.
+            let end = min(from.clip?.end ?? outDuration, outDuration)
+            let entry = to.clip?.start ?? 0
+            planTask = Task { [weak self] in
+                let incoming = await TrackAnalyzer.shared.analysis(for: to.url)
+                guard let self, !Task.isCancelled, self.current == from, self.upcoming == to else { return }
+                var plan = TransitionPlan.gapless(at: end, inGain: self.mix.loudnessTrims(nil, incoming).1)
+                plan.entry = entry
+                self.nextPlan = plan
+            }
+            return
+        }
         let mixing = mix.isOn
         planTask = Task { [weak self] in
             async let outAnalysis = TrackAnalyzer.shared.analysis(for: from.url)
@@ -953,6 +970,11 @@ final class MusicPlayer: ObservableObject {
            deck.isActive, deck.currentTime >= plan.mixStart - Self.mixLead {
             nextPlan = nil
             beginMix(plan)
+        }
+        // The end of a passage when no hand-over was lined up (Repeat One,
+        // the last entry, or the next song still being measured).
+        if mixPlan == nil, vlc == nil, let clip = current?.clip, deck.isActive, deck.currentTime >= clip.end {
+            trackEnded()
         }
         refresh()
     }

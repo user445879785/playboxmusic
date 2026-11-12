@@ -7,7 +7,7 @@ struct MusicAccountView: View {
     @AppStorage("playbox.music.username") private var username = ""
     @State private var password = ""
     /// Read here so this page repaints when the accent changes.
-    @AppStorage(Appearance.accentKey) private var accentHex = Appearance.defaultAccent
+    @ObservedObject private var appearance = Appearance.shared
 
     var body: some View {
         Form {
@@ -40,12 +40,12 @@ struct MusicAccountView: View {
             } header: {
                 Text("Mix between songs")
             }
-            MixSettingsForm(mix: player.mix).id(accentHex)
+            MixSettingsForm(mix: player.mix).id(appearance.accentHex)
 
             Section("Sound") {
                 Button("Equalizer") { showEqualizer = true }
             }
-            .id(accentHex)
+            .id(appearance.accentHex)
 
             UpdatesSection()
 

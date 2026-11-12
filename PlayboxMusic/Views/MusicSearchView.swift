@@ -14,6 +14,8 @@ struct MusicSearchView: View {
     @State private var albums: [ITunesItem] = []
     @State private var songs: [ITunesItem] = []
     @State private var catalogLoading = false
+    /// Set when a typo was fixed: what the results are really for.
+    @State private var correction: String?
     @AppStorage("music.recentSearches") private var recentStore = ""
 
     private var recentSearches: [String] {
@@ -106,6 +108,13 @@ struct MusicSearchView: View {
                 }
             }
 
+            if let correction, query.trimmingCharacters(in: .whitespaces).count >= 2 {
+                Section {
+                    Label("Showing results for “\(correction)”", systemImage: "wand.and.stars")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                }
+            }
             if mode == .catalog {
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     CatalogHomeView(recentSearches: recentSearches) { term in query = term }
@@ -172,11 +181,28 @@ struct MusicSearchView: View {
         .textInputAutocapitalization(.never)
         // Soulseek is never searched on its own, not even when switching to
         // its tab: only when you press Search on the keyboard.
-        .onChange(of: mode) { _, _ in quality = nil }
+        .onChange(of: mode) { _, _ in
+            quality = nil
+            correction = nil
+        }
         .onSubmit(of: .search) {
             if mode == .soulseek {
-                submitted = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                Task { await client.search(query) }
+                let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                submitted = term
+                correction = nil
+                Task {
+                    await client.search(term)
+                    // Soulseek only matches exact words. If nothing comes
+                    // back, the spelling is fixed and it is asked once more.
+                    try? await Task.sleep(for: .seconds(6))
+                    guard submitted == term, mode == .soulseek, client.results.isEmpty else { return }
+                    let hits = await SearchHelper.popular(term)
+                    guard submitted == term, client.results.isEmpty,
+                          let fixed = SearchHelper.corrected(term, from: hits) else { return }
+                    submitted = fixed
+                    correction = fixed
+                    await client.search(fixed)
+                }
             } else {
                 remember(query)
             }
@@ -185,6 +211,7 @@ struct MusicSearchView: View {
         .task(id: mode == .catalog ? "catalog|" + query : "soulseek") {
             guard mode == .catalog else { return }
             let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            correction = nil
             guard term.count >= 2 else {
                 albums = []
                 songs = []
@@ -195,10 +222,27 @@ struct MusicSearchView: View {
             defer { catalogLoading = false }
             async let foundAlbums = try? ITunesCatalog.search(term, entity: "album", limit: 20)
             async let foundSongs = try? ITunesCatalog.search(term, entity: "song", limit: 40)
-            let (newAlbums, newSongs) = await (foundAlbums ?? [], foundSongs ?? [])
+            async let foundHits = SearchHelper.popular(term)
+            let found = await (foundAlbums ?? [], foundSongs ?? [], foundHits)
+            var newAlbums = found.0
+            var newSongs = found.1
+            let hits = found.2
             guard !Task.isCancelled else { return }
+            // A typo finds little or nothing: search again for what was meant.
+            if newSongs.count < 3, let fixed = SearchHelper.corrected(term, from: hits) {
+                async let fixedAlbums = try? ITunesCatalog.search(fixed, entity: "album", limit: 20)
+                async let fixedSongs = try? ITunesCatalog.search(fixed, entity: "song", limit: 40)
+                let (moreAlbums, moreSongs) = await (fixedAlbums ?? [], fixedSongs ?? [])
+                guard !Task.isCancelled else { return }
+                if moreSongs.count > newSongs.count {
+                    newAlbums = moreAlbums
+                    newSongs = moreSongs
+                    correction = fixed
+                }
+            }
             albums = newAlbums
-            songs = newSongs
+            // Most played first, like Spotify.
+            songs = SearchHelper.byPopularity(newSongs, hits: hits)
             catalogLoading = false
             // Remember searches the user settled on.
             do { try await Task.sleep(for: .seconds(2)) } catch { return }

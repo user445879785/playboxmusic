@@ -166,6 +166,60 @@ enum ITunesCatalog {
     }
 }
 
+/// Search help from Deezer's public catalogue (no account or key). The
+/// iTunes search has no popularity numbers and gives up on typos; Deezer's
+/// forgives them and ranks every song by how much it is played. Only the
+/// words you search for are sent.
+enum SearchHelper {
+    struct Hit: Decodable, Sendable {
+        struct Artist: Decodable, Sendable { let name: String }
+        let title: String
+        let rank: Int?
+        let artist: Artist
+    }
+
+    private struct Response: Decodable { let data: [Hit] }
+
+    /// The most played songs matching the words, typos forgiven.
+    static func popular(_ term: String) async -> [Hit] {
+        var components = URLComponents(string: "https://api.deezer.com/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: term), URLQueryItem(name: "limit", value: "50")]
+        guard let url = components.url,
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(Response.self, from: data) else { return [] }
+        return decoded.data
+    }
+
+    static func key(artist: String?, title: String?) -> String {
+        MusicText.clean((artist ?? "") + " " + (title ?? "")).lowercased()
+    }
+
+    /// What you most likely meant: the top match's artist, with its title
+    /// too when you typed more words than the artist's name has.
+    static func corrected(_ term: String, from hits: [Hit]) -> String? {
+        guard let best = hits.first else { return nil }
+        let typed = MusicText.clean(term).split(separator: " ").count
+        let artistWords = MusicText.clean(best.artist.name).split(separator: " ").count
+        let guess = typed > artistWords ? best.artist.name + " " + best.title : best.artist.name
+        return MusicText.clean(guess).lowercased() == MusicText.clean(term).lowercased() ? nil : MusicText.clean(guess)
+    }
+
+    /// Puts the most played songs first; songs Deezer doesn't know keep
+    /// their place after them.
+    static func byPopularity(_ songs: [ITunesItem], hits: [Hit]) -> [ITunesItem] {
+        var ranks: [String: Int] = [:]
+        for hit in hits {
+            let id = key(artist: hit.artist.name, title: hit.title)
+            ranks[id] = max(ranks[id] ?? 0, hit.rank ?? 0)
+        }
+        let scored = songs.enumerated().map { offset, song in
+            (song, ranks[key(artist: song.artistName, title: song.trackName)] ?? -1, offset)
+        }
+        return scored.sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.2 < $1.2 }.map { $0.0 }
+    }
+}
+
 enum MusicText {
     /// Strips track numbers, bracketed tags and separators so names search well.
     static func clean(_ value: String) -> String {

@@ -12,13 +12,11 @@ struct MusicContentView: View {
     @AppStorage("playbox.music.username") private var username = ""
     @StateObject private var updater = UpdateChecker()
 
-    @AppStorage(Appearance.accentKey) private var accentHex = Appearance.defaultAccent
-    @AppStorage(Appearance.transparencyKey) private var dockTransparency = 0.5
-    @AppStorage(Appearance.scaleKey) private var dockScale = 1.0
+    @ObservedObject private var appearance = Appearance.shared
     @State private var tab = "search"
 
     var body: some View {
-        let dockHeight = GlassDock.baseHeight * dockScale
+        let dockHeight = GlassDock.baseHeight * appearance.dockScale
         let safeBottom = Self.deviceBottomInset
         let bottom = max(safeBottom - 8, 10)
         // Apple's TabView switches the pages and keeps each one's place;
@@ -30,17 +28,17 @@ struct MusicContentView: View {
         // reads the colour live, so the picker isn't torn down mid-drag.
         TabView(selection: $tab) {
             NavigationStack { MusicSearchView() }.withMiniPlayer()
-                .dockClearance(clearance).id(accentHex).tag("search")
+                .dockClearance(clearance).id(appearance.accentHex).tag("search")
             NavigationStack { DownloadsView() }.withMiniPlayer()
-                .dockClearance(clearance).id(accentHex).tag("downloads")
+                .dockClearance(clearance).id(appearance.accentHex).tag("downloads")
             NavigationStack { MusicLibraryView() }.withMiniPlayer()
-                .dockClearance(clearance).id(accentHex).tag("library")
+                .dockClearance(clearance).id(appearance.accentHex).tag("library")
             NavigationStack { MusicAccountView() }
                 .dockClearance(clearance).tag("settings")
         }
         .overlay(alignment: .bottom) {
-            DockLayer(selection: $tab, accent: Color(uiColor: UIColor(somaHex: accentHex)),
-                      transparency: dockTransparency, scale: dockScale)
+            DockLayer(selection: $tab, accent: Color(uiColor: UIColor(somaHex: appearance.accentHex)),
+                      transparency: appearance.dockTransparency, scale: appearance.dockScale)
                 .frame(height: dockHeight)
                 .padding(.horizontal, 14)
                 .padding(.bottom, bottom)
@@ -162,7 +160,7 @@ private struct MiniPlayerInset: ViewModifier {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(.spring(response: 0.45, dampingFraction: 0.85), value: player.current == nil)
+            .animation(.spring(response: 0.3, dampingFraction: 0.88), value: player.current == nil)
             // Presented from here, not from the bar: the bar goes away when
             // the queue ends, and a sheet must not lose what it hangs on.
             .fullScreenCover(isPresented: $showNowPlaying) {

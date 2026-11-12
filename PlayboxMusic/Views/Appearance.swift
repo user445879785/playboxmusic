@@ -3,7 +3,7 @@ import UIKit
 
 /// App-wide look: the accent colour and the glass dock's transparency and
 /// size, saved between launches. Same controls as SOMA's Setup › Dock.
-final class Appearance {
+final class Appearance: ObservableObject {
     static let shared = Appearance()
 
     static let swatches: [(name: String, hex: String)] = [
@@ -17,8 +17,26 @@ final class Appearance {
     static let scaleKey = "appearance.dockScale"
     static let defaultAccent = "#1FD661"
 
-    /// Read live from settings every time, so nothing can hold a stale colour.
-    var accentHex: String { UserDefaults.standard.string(forKey: Self.accentKey) ?? Self.defaultAccent }
+    // The settings are published from here, not read with @AppStorage:
+    // under ipakill (LiveContainer) one screen's @AppStorage isn't told when
+    // another screen changes a value, so the dock kept its old colour.
+    @Published var accentHex: String {
+        didSet { UserDefaults.standard.set(accentHex, forKey: Self.accentKey) }
+    }
+    @Published var dockTransparency: Double {
+        didSet { UserDefaults.standard.set(dockTransparency, forKey: Self.transparencyKey) }
+    }
+    @Published var dockScale: Double {
+        didSet { UserDefaults.standard.set(dockScale, forKey: Self.scaleKey) }
+    }
+
+    private init() {
+        let defaults = UserDefaults.standard
+        accentHex = defaults.string(forKey: Self.accentKey) ?? Self.defaultAccent
+        dockTransparency = defaults.object(forKey: Self.transparencyKey) as? Double ?? 0.5
+        dockScale = defaults.object(forKey: Self.scaleKey) as? Double ?? 1.0
+    }
+
     private var parsed: (hex: String, color: UIColor)?
 
     /// Parsed once per colour, not on every use (rows ask for it constantly).
@@ -54,16 +72,14 @@ extension UIColor {
 }
 
 /// Settings › Appearance: accent swatches plus a custom picker, and the
-/// dock's transparency and size. Stored with @AppStorage, which the dock
-/// and every screen read directly, so changes apply immediately.
+/// dock's transparency and size. Kept in `Appearance.shared`, which the dock
+/// and every screen watch, so changes apply immediately.
 struct AppearanceSection: View {
-    @AppStorage(Appearance.accentKey) private var accentHex = Appearance.defaultAccent
-    @AppStorage(Appearance.transparencyKey) private var dockTransparency = 0.5
-    @AppStorage(Appearance.scaleKey) private var dockScale = 1.0
+    @ObservedObject private var appearance = Appearance.shared
 
     private var accent: Binding<Color> {
-        Binding(get: { Color(uiColor: UIColor(somaHex: accentHex)) },
-                set: { accentHex = UIColor($0).hexString })
+        Binding(get: { Color(uiColor: UIColor(somaHex: appearance.accentHex)) },
+                set: { appearance.accentHex = UIColor($0).hexString })
     }
 
     var body: some View {
@@ -71,10 +87,10 @@ struct AppearanceSection: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     ForEach(Appearance.swatches, id: \.hex) { swatch in
-                        let selected = accentHex.caseInsensitiveCompare(swatch.hex) == .orderedSame
+                        let selected = appearance.accentHex.caseInsensitiveCompare(swatch.hex) == .orderedSame
                         let colour = Color(uiColor: UIColor(somaHex: swatch.hex))
                         Button {
-                            accentHex = swatch.hex
+                            appearance.accentHex = swatch.hex
                         } label: {
                             Circle()
                                 .fill(colour)
@@ -90,19 +106,19 @@ struct AppearanceSection: View {
                 .padding(.vertical, 8)
                 .padding(.horizontal, 6)
             }
-            .sensoryFeedback(.selection, trigger: accentHex)
+            .sensoryFeedback(.selection, trigger: appearance.accentHex)
             ColorPicker("Custom colour", selection: accent, supportsOpacity: false)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Dock transparency")
                     Spacer()
-                    Text(abs(dockTransparency - 0.5) < 0.01 ? "Standard" : "\(Int((dockTransparency * 100).rounded()))%")
+                    Text(abs(appearance.dockTransparency - 0.5) < 0.01 ? "Standard" : "\(Int((appearance.dockTransparency * 100).rounded()))%")
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
                 HStack {
                     Text("Solid").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: $dockTransparency, in: 0...1, step: 0.05)
+                    Slider(value: $appearance.dockTransparency, in: 0...1, step: 0.05)
                     Text("Clear").font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -110,18 +126,18 @@ struct AppearanceSection: View {
                 HStack {
                     Text("Dock size")
                     Spacer()
-                    Text("\(Int((dockScale * 100).rounded()))%").foregroundStyle(.secondary).monospacedDigit()
+                    Text("\(Int((appearance.dockScale * 100).rounded()))%").foregroundStyle(.secondary).monospacedDigit()
                 }
                 HStack {
                     Text("S").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: $dockScale, in: 0.8...1.25, step: 0.05)
+                    Slider(value: $appearance.dockScale, in: 0.8...1.25, step: 0.05)
                     Text("L").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Button("Reset Appearance") {
-                accentHex = Appearance.defaultAccent
-                dockTransparency = 0.5
-                dockScale = 1
+                appearance.accentHex = Appearance.defaultAccent
+                appearance.dockTransparency = 0.5
+                appearance.dockScale = 1
             }
         } header: {
             Text("Appearance")
