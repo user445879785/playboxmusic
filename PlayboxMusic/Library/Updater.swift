@@ -119,6 +119,31 @@ struct UpdateSheet: View {
     let release: UpdateChecker.Release
     @State private var copied = false
 
+    /// ipakill (LiveContainer) answers livecontainer:// links.
+    private static let ipakillScheme = "livecontainer"
+
+    private var hasIpakill: Bool {
+        URL(string: "\(Self.ipakillScheme)://").map(UIApplication.shared.canOpenURL) ?? false
+    }
+
+    /// Hands the IPA's web address straight to ipakill, which downloads
+    /// it and installs it. Going through Safari's Downloads first can give
+    /// ipakill a file it doesn't recognise as an IPA ("Please provide an
+    /// IPA file to install"). Falls back to Safari without ipakill.
+    private func installWithIpakill() {
+        var components = URLComponents()
+        components.scheme = Self.ipakillScheme
+        components.host = "install"
+        components.queryItems = [URLQueryItem(name: "url", value: release.ipaURL.absoluteString)]
+        guard let link = components.url else {
+            openURL(release.ipaURL)
+            return
+        }
+        openURL(link) { accepted in
+            if !accepted { openURL(release.ipaURL) }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
@@ -134,13 +159,16 @@ struct UpdateSheet: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                 }
-                Text("Download the new IPA, then install it the same way you installed this one (ipakill, your signer, or a PC). Your music, likes and settings stay.")
+                Text(hasIpakill
+                     ? "ipakill downloads and installs the new version itself. Your music, stars and settings stay."
+                     : "Download the new IPA, then install it the same way you installed this one. Your music, stars and settings stay.")
                     .font(.callout).foregroundStyle(.secondary)
 
                 Button {
-                    openURL(release.ipaURL)
+                    installWithIpakill()
                 } label: {
-                    Label("Download IPA", systemImage: "arrow.down.circle.fill")
+                    Label(hasIpakill ? "Install with ipakill" : "Download IPA",
+                          systemImage: hasIpakill ? "arrow.down.app.fill" : "arrow.down.circle.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
@@ -159,8 +187,8 @@ struct UpdateSheet: View {
                             .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .contentTransition(.symbolEffect(.replace))
                     }
-                    Button { openURL(release.pageURL) } label: {
-                        Label("Release Page", systemImage: "safari")
+                    Button { openURL(release.ipaURL) } label: {
+                        Label("Safari", systemImage: "safari")
                             .frame(maxWidth: .infinity).padding(.vertical, 11)
                             .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }

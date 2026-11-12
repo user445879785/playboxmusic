@@ -33,6 +33,8 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         NSLocalNetworkUsageDescription: Playbox Music accepts incoming Soulseek peer connections for searches and downloads.
         NSBluetoothAlwaysUsageDescription: Playbox Music reads your earbuds' battery level over Bluetooth.
+        # So the update sheet can tell whether ipakill is installed.
+        LSApplicationQueriesSchemes: [livecontainer]
         # Lets Files, Safari and AirDrop send songs with "Open in Playbox Music".
         CFBundleDocumentTypes:
           - CFBundleTypeName: Audio
