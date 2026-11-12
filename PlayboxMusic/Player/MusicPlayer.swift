@@ -507,7 +507,7 @@ final class MusicPlayer: ObservableObject {
     /// Minutes until the music stops, or nil to turn the timer off.
     func setSleepTimer(minutes: Int?) {
         engine.mainMixerNode.outputVolume = 1
-        sleepTimer = minutes.map { .until(Date().addingTimeInterval(Double($0) * 60)) } ?? .off
+        sleepTimer = minutes.map { SleepTimer.until(Date().addingTimeInterval(Double($0) * 60)) } ?? .off
     }
 
     func sleepAtEndOfSong() {
