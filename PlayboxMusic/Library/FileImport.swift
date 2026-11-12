@@ -10,10 +10,19 @@ extension MusicLibrary {
     }
 
     /// Copies songs (or whole folders of songs) from Files into the library,
-    /// under Music/Imported, and returns how many were added.
+    /// under Music/Imported, and returns how many were added. Copying an
+    /// album can take seconds, so it runs off the main thread.
     @discardableResult
-    func importFiles(_ urls: [URL]) -> Int {
+    func importFiles(_ urls: [URL]) async -> Int {
         let destination = root.appendingPathComponent("Imported", isDirectory: true)
+        let count = await Task.detached(priority: .userInitiated) {
+            Self.copyFiles(urls, into: destination)
+        }.value
+        await refresh()
+        return count
+    }
+
+    nonisolated private static func copyFiles(_ urls: [URL], into destination: URL) -> Int {
         try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         var count = 0
         for url in urls {
@@ -23,7 +32,7 @@ extension MusicLibrary {
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else { continue }
             if isFolder.boolValue {
                 // Keep the album folder's name so artist/album parsing still works.
-                let folder = Self.unique(destination.appendingPathComponent(url.lastPathComponent, isDirectory: true))
+                let folder = unique(destination.appendingPathComponent(url.lastPathComponent, isDirectory: true))
                 try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
                 while let file = files?.nextObject() as? URL {
@@ -34,12 +43,11 @@ extension MusicLibrary {
                 if copy(url, into: destination) { count += 1 }
             }
         }
-        reload()
         return count
     }
 
-    private func copy(_ file: URL, into folder: URL) -> Bool {
-        let target = Self.unique(folder.appendingPathComponent(file.lastPathComponent))
+    nonisolated private static func copy(_ file: URL, into folder: URL) -> Bool {
+        let target = unique(folder.appendingPathComponent(file.lastPathComponent))
         do {
             try FileManager.default.copyItem(at: file, to: target)
             return true
@@ -49,7 +57,7 @@ extension MusicLibrary {
     }
 
     /// "Song.mp3" → "Song 2.mp3" when the name is taken.
-    private static func unique(_ url: URL) -> URL {
+    nonisolated private static func unique(_ url: URL) -> URL {
         guard FileManager.default.fileExists(atPath: url.path) else { return url }
         let folder = url.deletingLastPathComponent()
         let stem = url.deletingPathExtension().lastPathComponent

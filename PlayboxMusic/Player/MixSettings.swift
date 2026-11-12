@@ -155,6 +155,15 @@ struct TransitionPlan: Equatable {
     var beat: Double
 
     var mixEnd: Double { mixStart + length }
+
+    /// No blend at all: the next song starts on the exact sample the current
+    /// one ends, so albums that run together have no gap (used when Mix is off).
+    static func gapless(at end: Double, inGain: Float) -> TransitionPlan {
+        TransitionPlan(mixStart: end, entry: 0, length: 0, bars: 0, volume: .cut, eq: .none, effect: .none,
+                       preset: nil, outGain: 0, inGain: inGain, inRate: 1, beat: 0.5)
+    }
+
+    var isGapless: Bool { length <= 0 }
 }
 
 func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {

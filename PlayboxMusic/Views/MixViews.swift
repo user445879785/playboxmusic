@@ -37,8 +37,11 @@ private struct MixQueueList: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
 
-                ForEach(Array(player.queue.enumerated()), id: \.offset) { offset, track in
-                    row(track, offset: offset)
+                // Each row is known by its song (and which copy of it, when a
+                // song is queued twice), so dragging one moves that row
+                // instead of redrawing them all. Press and hold a row to drag it.
+                ForEach(queueRows) { item in
+                    row(item.track, offset: item.offset)
                         .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 12))
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -78,6 +81,22 @@ private struct MixQueueList: View {
         .preferredColorScheme(.dark)
         .presentationBackground(.black)
         .task(id: player.queue) { await loadTotalDuration() }
+    }
+
+    private struct QueueRow: Identifiable {
+        let offset: Int
+        let track: Track
+        let copy: Int
+        var id: String { "\(track.url.path)#\(copy)" }
+    }
+
+    private var queueRows: [QueueRow] {
+        var seen: [URL: Int] = [:]
+        return player.queue.enumerated().map { offset, track in
+            let copy = seen[track.url, default: 0]
+            seen[track.url] = copy + 1
+            return QueueRow(offset: offset, track: track, copy: copy)
+        }
     }
 
     // MARK: Header
@@ -176,10 +195,12 @@ private struct MixQueueList: View {
     }
 
     private func loadTotalDuration() async {
+        // Lengths come from the files' headers. (This used to decode every
+        // song in the queue, the whole library when playing from Library.)
         var total = 0.0
         for track in player.queue.dropFirst(player.index) {
-            guard let analysis = await TrackAnalyzer.shared.analysis(for: track.url) else { continue }
-            total += analysis.duration
+            if Task.isCancelled { return }
+            total += await TrackAnalyzer.shared.duration(for: track.url) ?? 0
         }
         totalDuration = total
     }
@@ -250,7 +271,7 @@ private struct MixQueueList: View {
     }
 
     private func transitionLabel(from: Track, to: Track, offset: Int) -> String {
-        if offset == player.index, let plan = player.nextPlan {
+        if offset == player.index, let plan = player.nextPlan, !plan.isGapless {
             return plan.preset?.rawValue ?? "Custom"
         }
         let custom = mix.transitionOverride(from: from, to: to)
@@ -378,6 +399,8 @@ private struct TransitionEditor: View {
     @State private var incoming: TrackAnalysis?
     @State private var loaded = false
     @State private var showSettings = false
+    /// True while a waveform is being dragged, so the page holds still.
+    @State private var timelineHeld = false
 
     private var custom: TransitionOverride { mix.transitionOverride(from: pair.from, to: pair.to) }
 
@@ -399,6 +422,7 @@ private struct TransitionEditor: View {
                     VStack(spacing: 18) {
                         if !mix.isOn { mixOffBanner }
                         MixTimeline(outgoing: outgoing, incoming: incoming, plan: plan, pair: pair,
+                                    held: $timelineHeld,
                                     onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0) })
                             .frame(height: 336)
                             .overlay { previewButton(plan) }
@@ -418,6 +442,7 @@ private struct TransitionEditor: View {
                     }
                     .padding(.vertical, 12)
                 }
+                .scrollDisabled(timelineHeld)
             } else {
                 Spacer()
                 ContentUnavailableView("Can't Edit This Transition", systemImage: "waveform.slash",
@@ -439,6 +464,7 @@ private struct TransitionEditor: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .interactiveDismissDisabled(timelineHeld)
         .task { await load() }
     }
 
@@ -699,10 +725,15 @@ private struct MixTimeline: View {
     let incoming: TrackAnalysis
     let plan: TransitionPlan
     let pair: TransitionPair
+    @Binding var held: Bool
     let onMoveStart: (Double) -> Void
     let onMoveEntry: (Double) -> Void
 
     @State private var drag: DragState?
+    /// The finger is going up or down: that's the page scrolling, not us.
+    @State private var scrolling = false
+    @GestureState private var touching = false
+    @GestureState private var seekTouching = false
 
     private struct DragState {
         var lane: Lane
@@ -745,7 +776,15 @@ private struct MixTimeline: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .gesture(dragGesture(size: size))
+                // Alongside the page's scrolling, not instead of it: a
+                // sideways drag always moves the waveform (and holds the page
+                // still), an up or down one scrolls.
+                .simultaneousGesture(dragGesture(size: size))
+            }
+            .onDragCancelled(touching, stillBusy: { drag != nil || scrolling || held }) {
+                drag = nil
+                scrolling = false
+                held = false
             }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             seekBar
@@ -777,6 +816,7 @@ private struct MixTimeline: View {
             .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($seekTouching) { _, state, _ in state = true }
                     .onChanged { value in
                         guard isPlayingPair else { return }
                         let span = window.upperBound - window.lowerBound
@@ -790,6 +830,7 @@ private struct MixTimeline: View {
             )
         }
         .frame(height: 28)
+        .onDragCancelled(seekTouching, stillBusy: { seeking != nil }) { seeking = nil }
         .opacity(isPlayingPair ? 1 : 0.35)
         .animation(.snappy(duration: 0.15), value: seeking == nil)
         .accessibilityLabel("Playback position in the transition")
@@ -910,8 +951,15 @@ private struct MixTimeline: View {
 
     private func dragGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
+            .updating($touching) { _, state, _ in state = true }
             .onChanged { value in
                 if drag == nil {
+                    guard !scrolling else { return }
+                    if abs(value.translation.height) > abs(value.translation.width) {
+                        scrolling = true
+                        return
+                    }
+                    held = true
                     let lane: Lane = value.startLocation.y < size.height / 2 ? .outgoing : .incoming
                     drag = DragState(lane: lane, window: window,
                                      origin: lane == .outgoing ? plan.mixStart : plan.entry)
@@ -937,6 +985,8 @@ private struct MixTimeline: View {
                     }
                 }
                 drag = nil
+                scrolling = false
+                held = false
             }
     }
 }

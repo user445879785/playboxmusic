@@ -28,7 +28,15 @@ final class SoulseekClient: ObservableObject {
     let checks = CatalogChecks()
     @Published private(set) var results: [SlskSearchResult] = []
     @Published private(set) var isSearching = false
-    @Published private(set) var transfers: [SlskTransfer] = []
+    @Published private(set) var transfers: [SlskTransfer] = [] {
+        didSet {
+            let active = transfers.filter(\.state.isActive).count
+            if badge.active != active { badge.active = active }
+        }
+    }
+    /// The Downloads tab's badge, on its own so the tab bar isn't redrawn
+    /// for every progress update.
+    let badge = DownloadBadge()
     @Published private(set) var listenPort: UInt16?
     /// How the router was asked to open our port, if it worked.
     @Published private(set) var portMapping: String?
@@ -84,6 +92,18 @@ final class SoulseekClient: ObservableObject {
     private var transferMeta: [UUID: TrackMeta] = [:]
     private var resumeAttempts: [UUID: Int] = [:]
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// iOS said our background time is up; don't ask again until the app is back.
+    private var backgroundExpired = false
+    /// Search answers and download progress arrive dozens of times a
+    /// second; they are collected here and shown a few times a second.
+    private var pendingResults: [SlskSearchResult] = []
+    private var resultsFlush: Task<Void, Never>?
+    private var pendingProgress: [UUID: (received: UInt64, speed: Double)] = [:]
+    private var progressFlush: Task<Void, Never>?
+    /// For signing back in by itself after the connection drops.
+    private var credentials: (name: String, password: String)?
+    private var wantsConnection = false
+    private var reconnectTask: Task<Void, Never>?
     private var peers: [String: SlskSocket] = [:]
     private var addressWaiters: [String: [CheckedContinuation<(String, UInt16)?, Never>]] = [:]
     private var pierceWaiters: [UInt32: CheckedContinuation<SlskSocket?, Never>] = [:]
@@ -115,8 +135,12 @@ final class SoulseekClient: ObservableObject {
 
     // MARK: Session
 
-    func connect(username rawUsername: String, password: String) async {
-        disconnect()
+    func connect(username rawUsername: String, password: String, automatic: Bool = false) async {
+        if !automatic {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+        }
+        tearDown()
         let name = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !password.isEmpty else {
             connectionState = .failed("Enter a Soulseek username and password.")
@@ -124,6 +148,8 @@ final class SoulseekClient: ObservableObject {
         }
 
         connectionState = .connecting
+        credentials = (name, password)
+        wantsConnection = true
         let socket = SlskSocket(host: Self.serverHost, port: Self.serverPort)
         do {
             try await socket.open(timeout: 15)
@@ -172,8 +198,50 @@ final class SoulseekClient: ObservableObject {
             socket.close()
             if server === socket { server = nil }
             stopListener()
+            // A refused login won't get better by trying again.
+            if error is ClientError { wantsConnection = false }
             connectionState = .failed(error.localizedDescription)
         }
+    }
+
+    /// The server connection drops whenever iOS suspends the app. Sign back
+    /// in quietly, waiting a little longer after each failed try.
+    private func scheduleReconnect() {
+        guard wantsConnection, reconnectTask == nil, let credentials else { return }
+        reconnectTask = Task { [weak self] in
+            for delay in [1, 3, 8, 20, 60] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled, self.wantsConnection else { return }
+                // In the background there's no one to search for; wait for the app to return.
+                if UIApplication.shared.applicationState == .background { break }
+                if self.isConnected || self.connectionState == .connecting { break }
+                await self.connect(username: credentials.name, password: credentials.password, automatic: true)
+                if self.isConnected { break }
+            }
+            self?.reconnectTask = nil
+        }
+    }
+
+    /// Call when the app comes back on screen.
+    func sceneActive() {
+        backgroundExpired = false
+        updateBackgroundTime()
+        guard let server, isConnected else {
+            scheduleReconnect()
+            return
+        }
+        // A socket that died while suspended can still look connected;
+        // a ping finds out.
+        Task {
+            do { try await server.send(SlskWriter.message(code: 32)) } catch { serverLost(server) }
+        }
+    }
+
+    private func serverLost(_ socket: SlskSocket) {
+        guard server === socket else { return }
+        tearDown()
+        connectionState = .failed("Disconnected from the Soulseek server.")
+        scheduleReconnect()
     }
 
     private func mapPort(_ port: UInt16) async {
@@ -187,6 +255,9 @@ final class SoulseekClient: ObservableObject {
     }
 
     func disconnect() {
+        wantsConnection = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
         tearDown()
         connectionState = .disconnected
     }
@@ -218,6 +289,7 @@ final class SoulseekClient: ObservableObject {
         let token = UInt32.random(in: 1...UInt32.max)
         searchToken = token
         results = []
+        pendingResults = []
         isSearching = true
         do {
             try await server.send(SlskWriter.message(code: 26) { $0.u32(token); $0.string(trimmed) })
@@ -590,12 +662,40 @@ final class SoulseekClient: ObservableObject {
         updateBackgroundTime()
     }
 
+    /// Progress from every active download, published together.
+    private func noteProgress(_ id: UUID, received: UInt64, speed: Double) {
+        pendingProgress[id] = (received, speed)
+        guard progressFlush == nil else { return }
+        progressFlush = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            self?.flushProgress()
+        }
+    }
+
+    private func flushProgress() {
+        progressFlush = nil
+        guard !pendingProgress.isEmpty else { return }
+        var next = transfers
+        for index in next.indices where next[index].state == .transferring {
+            guard let progress = pendingProgress[next[index].id] else { continue }
+            next[index].received = progress.received
+            next[index].bytesPerSecond = progress.speed
+        }
+        pendingProgress = [:]
+        transfers = next
+    }
+
     /// Asks iOS for extra time so transfers survive briefly leaving the app.
     private func updateBackgroundTime() {
         let active = transfers.contains { $0.state.isActive }
-        if active, backgroundTask == .invalid {
+        if active, backgroundTask == .invalid, !backgroundExpired {
             backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Soulseek downloads") { [weak self] in
-                Task { @MainActor in self?.endBackgroundTime() }
+                // iOS calls this on the main thread and expects the task to
+                // be ended before it returns, or it may stop the app.
+                MainActor.assumeIsolated {
+                    self?.backgroundExpired = true
+                    self?.endBackgroundTime()
+                }
             }
         } else if !active {
             endBackgroundTime()
@@ -632,9 +732,7 @@ final class SoulseekClient: ObservableObject {
             guard let frame = try? await socket.readFrame() else { break }
             handleServerMessage(frame)
         }
-        guard server === socket else { return }
-        tearDown()
-        connectionState = .failed("Disconnected from the Soulseek server.")
+        serverLost(socket)
     }
 
     private func handleServerMessage(_ frame: Data) {
@@ -656,6 +754,7 @@ final class SoulseekClient: ObservableObject {
             Task { await answerConnectRequest(username: user, type: type, host: host, port: UInt16(truncatingIfNeeded: port), token: token) }
 
         case 41: // Relogged
+            wantsConnection = false
             tearDown()
             connectionState = .failed("Signed out because this account logged in elsewhere.")
 
@@ -685,13 +784,18 @@ final class SoulseekClient: ObservableObject {
                     switch state {
                     case .ready:
                         if once.claim() { continuation.resume(returning: listener.port?.rawValue) }
-                    case .failed, .cancelled:
+                    // "Waiting" is what a denied Local Network permission
+                    // looks like; sign-in used to hang on it forever.
+                    case .failed, .cancelled, .waiting:
                         if once.claim() { continuation.resume(returning: nil) }
                     default:
                         break
                     }
                 }
                 listener.start(queue: .global(qos: .userInitiated))
+                DispatchQueue.global().asyncAfter(deadline: .now() + 4) {
+                    if once.claim() { continuation.resume(returning: nil) }
+                }
             }
             if let ready {
                 self.listener = listener
@@ -959,7 +1063,8 @@ final class SoulseekClient: ObservableObject {
         guard let user = try? reader.string(), let token = try? reader.u32(),
               let count = try? reader.u32() else { return }
         let collecting = collectors[token] != nil
-        guard collecting || (token == searchToken && results.count < Self.maxResults) else { return }
+        let shown = results.count + pendingResults.count
+        guard collecting || (token == searchToken && shown < Self.maxResults) else { return }
 
         var files: [(String, UInt64, [UInt32: UInt32])] = []
         for _ in 0..<min(count, 5000) {
@@ -996,7 +1101,16 @@ final class SoulseekClient: ObservableObject {
         if collecting {
             collectors[token]?.append(contentsOf: parsed.prefix(3000))
         } else {
-            results.append(contentsOf: parsed.prefix(Self.maxResults - results.count))
+            pendingResults.append(contentsOf: parsed.prefix(Self.maxResults - shown))
+            guard resultsFlush == nil else { return }
+            resultsFlush = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let self else { return }
+                self.resultsFlush = nil
+                guard !self.pendingResults.isEmpty else { return }
+                self.results.append(contentsOf: self.pendingResults)
+                self.pendingResults = []
+            }
         }
     }
 
@@ -1029,14 +1143,10 @@ final class SoulseekClient: ObservableObject {
             }
 
             try await Self.receiveFile(from: socket, size: transfer.size, offset: resumeFrom, to: destination) { [weak self] received, speed in
-                Task { @MainActor in
-                    self?.update(id) {
-                        $0.received = received
-                        $0.bytesPerSecond = speed
-                    }
-                }
+                Task { @MainActor in self?.noteProgress(id, received: received, speed: speed) }
             }
             socket.close()
+            pendingProgress[id] = nil
             update(id) {
                 $0.received = $0.size
                 $0.state = .completed(destination)
@@ -1134,6 +1244,12 @@ final class SoulseekClient: ObservableObject {
         default: "Soulseek rejected the login: \(reason)"
         }
     }
+}
+
+/// How many downloads are running, for the tab bar's badge.
+@MainActor
+final class DownloadBadge: ObservableObject {
+    @Published var active = 0
 }
 
 /// What catalogue rows watch: each check's result and whether we're signed in.

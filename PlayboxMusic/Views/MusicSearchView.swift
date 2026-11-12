@@ -83,6 +83,9 @@ struct MusicSearchView: View {
     }
 
     var body: some View {
+        // Filtered and sorted once per redraw (it used to be done three times).
+        let visible = mode == .soulseek ? visibleResults : []
+        let groups = mode == .soulseek && field == .album ? folderGroups(visible) : []
         List {
             Section {
                 Picker("Search", selection: $mode) {
@@ -124,19 +127,19 @@ struct MusicSearchView: View {
                 if !client.results.isEmpty || client.isSearching {
                     Section {
                         if field == .album {
-                            ForEach(folderGroups) { group in
+                            ForEach(groups) { group in
                                 FolderRow(files: group.files)
                             }
                         } else {
-                            ForEach(visibleResults) { result in
+                            ForEach(visible) { result in
                                 ResultRow(result: result)
                             }
                         }
                     } header: {
                         HStack {
                             Text(field == .album
-                                 ? "\(folderGroups.count) albums · \(visibleResults.count) files"
-                                 : "\(visibleResults.count) of \(client.results.count) files")
+                                 ? "\(groups.count) albums · \(visible.count) files"
+                                 : "\(visible.count) of \(client.results.count) files")
                             if client.isSearching {
                                 Spacer()
                                 ProgressView().controlSize(.small)
@@ -167,16 +170,9 @@ struct MusicSearchView: View {
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Artist, album or track")
         .autocorrectionDisabled()
         .textInputAutocapitalization(.never)
-        // Switching modes searches the same words in the new mode, so you
-        // never see the other mode's old results.
-        .onChange(of: mode) { _, newMode in
-            quality = nil
-            let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            if newMode == .soulseek, term.count >= 2, term != submitted {
-                submitted = term
-                Task { await client.search(term) }
-            }
-        }
+        // Soulseek is never searched on its own, not even when switching to
+        // its tab: only when you press Search on the keyboard.
+        .onChange(of: mode) { _, _ in quality = nil }
         .onSubmit(of: .search) {
             if mode == .soulseek {
                 submitted = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -243,8 +239,8 @@ struct MusicSearchView: View {
         let files: [SlskSearchResult]
     }
 
-    private var folderGroups: [FolderGroup] {
-        let groups = Dictionary(grouping: visibleResults) { result -> String in
+    private func folderGroups(_ results: [SlskSearchResult]) -> [FolderGroup] {
+        let groups = Dictionary(grouping: results) { result -> String in
             result.username + "\u{1F}" + result.filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: "/")
         }
         return groups.map { FolderGroup(id: $0.key, files: $0.value.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }) }

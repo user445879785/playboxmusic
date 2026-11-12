@@ -21,21 +21,30 @@ private final class AudioDeck {
     private var segmentStart: Double = 0
     private var pausedAt: Double?
     private var generation = 0
+    /// The last position the engine reported, kept for when iOS stops the
+    /// engine under us (a call, earbuds changing) and it can't be asked.
+    private var lastTime: Double = 0
+
+    private var engineRunning: Bool { player.engine?.isRunning == true }
+    var isPaused: Bool { pausedAt != nil }
 
     var duration: Double {
         guard let file else { return 0 }
         return Double(file.length) / file.processingFormat.sampleRate
     }
 
-    var isActive: Bool { file != nil && player.isPlaying }
+    var isActive: Bool { file != nil && engineRunning && player.isPlaying }
 
     var currentTime: Double {
         guard file != nil else { return 0 }
         if let pausedAt { return pausedAt }
-        guard let nodeTime = player.lastRenderTime, let time = player.playerTime(forNodeTime: nodeTime) else {
-            return segmentStart
+        guard engineRunning, let nodeTime = player.lastRenderTime, nodeTime.isSampleTimeValid,
+              let time = player.playerTime(forNodeTime: nodeTime) else {
+            return lastTime
         }
-        return min(duration, segmentStart + Double(time.sampleTime) / time.sampleRate)
+        // Before a scheduled start the player's own clock is still negative.
+        lastTime = min(duration, segmentStart + max(0, Double(time.sampleTime) / time.sampleRate))
+        return lastTime
     }
 
     func attach(to engine: AVAudioEngine, output: AVAudioNode) {
@@ -71,9 +80,11 @@ private final class AudioDeck {
         self.url = url
     }
 
-    /// Plays from `seconds`. `onEnd` fires only if this segment reaches its end.
-    func play(from seconds: Double, onEnd: @escaping @MainActor () -> Void) {
-        guard let file else { return }
+    /// Plays from `seconds`, now or at an exact time on the audio clock.
+    /// `onEnd` fires only if this segment reaches its end.
+    func play(from seconds: Double, at when: AVAudioTime? = nil, onEnd: @escaping @MainActor () -> Void) {
+        // Starting a player while the engine is stopped raises an exception.
+        guard let file, engineRunning else { return }
         player.stop()
         generation += 1
         let token = generation
@@ -81,6 +92,7 @@ private final class AudioDeck {
         let startFrame = AVAudioFramePosition(max(0, min(seconds, duration - 0.05)) * rate)
         let frames = AVAudioFrameCount(max(1, file.length - startFrame))
         segmentStart = Double(startFrame) / rate
+        lastTime = segmentStart
         pausedAt = nil
         player.scheduleSegment(file, startingFrame: startFrame, frameCount: frames, at: nil,
                                completionCallbackType: .dataPlayedBack) { [weak self] _ in
@@ -89,7 +101,7 @@ private final class AudioDeck {
                 onEnd()
             }
         }
-        player.play()
+        if let when { player.play(at: when) } else { player.play() }
     }
 
     /// Sets the high-pass cutoff; below ~25 Hz the filter is bypassed.
@@ -135,7 +147,7 @@ private final class AudioDeck {
     }
 
     func resume() {
-        guard file != nil, pausedAt != nil else { return }
+        guard file != nil, pausedAt != nil, engineRunning else { return }
         pausedAt = nil
         player.play()
     }
@@ -145,6 +157,7 @@ private final class AudioDeck {
         player.stop()
         pausedAt = nil
         segmentStart = 0
+        lastTime = 0
         timePitch.rate = 1
         trim.globalGain = 0
         resetEffects()
@@ -161,12 +174,18 @@ private final class AudioDeck {
 /// (scrubber, times, lyrics) redraw as it advances.
 @MainActor
 final class PlaybackClock: ObservableObject {
-    @Published fileprivate(set) var elapsed: Double = 0
+    /// Not published: bars and lyrics read the time themselves through
+    /// `elapsed(at:)`, so nothing is redrawn 20 times a second just because
+    /// time passed.
+    fileprivate(set) var elapsed: Double = 0
     @Published fileprivate(set) var duration: Double = 0
+    @Published fileprivate(set) var running = false
     /// Progress 0…1 through the transition while two songs are mixing.
     @Published fileprivate(set) var mixProgress: Double?
+    /// Goes up when the position jumps (a seek, a new song), so views that
+    /// are paused know to look again.
+    @Published fileprivate(set) var jumps = 0
     fileprivate(set) var updatedAt = Date()
-    fileprivate(set) var running = false
 
     var progress: Double { duration > 0 ? min(max(elapsed / duration, 0), 1) : 0 }
 
@@ -176,11 +195,12 @@ final class PlaybackClock: ObservableObject {
         return min(duration, elapsed + date.timeIntervalSince(updatedAt))
     }
 
-    fileprivate func set(elapsed: Double, duration: Double, running: Bool) {
-        if abs(self.elapsed - elapsed) > 0.001 { self.elapsed = elapsed }
-        if self.duration != duration { self.duration = duration }
-        self.running = running
+    fileprivate func set(elapsed: Double, duration: Double, running: Bool, jumped: Bool = false) {
+        self.elapsed = elapsed
         updatedAt = Date()
+        if self.duration != duration { self.duration = duration }
+        if self.running != running { self.running = running }
+        if jumped { jumps += 1 }
     }
 }
 
@@ -220,6 +240,17 @@ final class MusicPlayer: ObservableObject {
     var skipProvider: ((Track) -> Bool)?
     /// Supplies songs to continue with when the queue runs out.
     var similarProvider: ((Track, [Track]) -> [Track])?
+    /// Told once a song has been half heard, for play counts.
+    var playedProvider: ((Track) -> Void)?
+
+    /// Stops the music after a while, or when the current song ends.
+    enum SleepTimer: Equatable {
+        case off
+        case until(Date)
+        case endOfSong
+    }
+
+    @Published private(set) var sleepTimer: SleepTimer = .off
 
     let mix = MixSettings()
     let equalizer = EqualizerSettings()
@@ -233,6 +264,12 @@ final class MusicPlayer: ObservableObject {
     private var vlc: VLCMediaPlayer?
     private var vlcStarted = false
     private var userPaused = false
+    /// True while a call or another app has taken the sound from us.
+    private var interrupted = false
+    private var countedPlay = false
+    private var lockScreenArtwork: (image: UIImage, item: MPMediaItemArtwork)?
+    /// How far ahead of a blend the next song is lined up on the audio clock.
+    private static let mixLead = 0.3
     private var originalOrder: [Track]?
     private var tickTask: Task<Void, Never>?
     private var mixStartedAt: Date?
@@ -296,19 +333,40 @@ final class MusicPlayer: ObservableObject {
 
     func play(_ tracks: [Track], startAt start: Int) {
         guard tracks.indices.contains(start) else { return }
-        originalOrder = nil
         skipDirection = 1
         // Keep the song you tapped; leave out the snoozed and hidden ones.
-        let chosen = tracks[start]
-        let kept = tracks.enumerated().filter { $0.offset == start || !(skipProvider?($0.element) ?? false) }
-        queue = kept.map(\.element)
-        index = queue.firstIndex(of: chosen) ?? 0
+        // Its place is counted, not looked up by name: a playlist can hold
+        // the same song twice.
+        var kept: [Track] = []
+        var chosen = 0
+        for (offset, track) in tracks.enumerated() {
+            if offset == start {
+                chosen = kept.count
+            } else if skipProvider?(track) ?? false {
+                continue
+            }
+            kept.append(track)
+        }
+        queue = kept
+        index = chosen
+        // Remember the list's own order so turning Shuffle off puts it back.
+        originalOrder = shuffle ? kept : nil
         if shuffle { shuffleUpcoming() }
         startCurrent(from: 0)
     }
 
+    /// Turns Shuffle on and starts from a random song.
+    func playShuffled(_ tracks: [Track]) {
+        let playable = tracks.filter { !(skipProvider?($0) ?? false) }
+        let list = playable.isEmpty ? tracks : playable
+        guard !list.isEmpty else { return }
+        shuffle = true
+        play(list, startAt: Int.random(in: list.indices))
+    }
+
     func playNext(_ track: Track) {
         guard current != nil else { return play([track], startAt: 0) }
+        cancelMix()
         queue.insert(track, at: min(index + 1, queue.count))
         preparePlan()
     }
@@ -320,27 +378,33 @@ final class MusicPlayer: ObservableObject {
     }
 
     func moveQueue(from source: IndexSet, to destination: Int) {
-        let playing = current
-        queue.move(fromOffsets: source, toOffset: destination)
-        if let playing, let newIndex = queue.firstIndex(of: playing) { index = newIndex }
+        cancelMix()
+        // Follow the playing song by its place, not its name: the same
+        // song can be in the queue twice.
+        var order = Array(queue.indices)
+        order.move(fromOffsets: source, toOffset: destination)
+        let moved = order.map { queue[$0] }
+        queue = moved
+        index = order.firstIndex(of: index) ?? index
         preparePlan()
     }
 
     func removeFromQueue(at offsets: IndexSet) {
-        let playing = current
+        cancelMix()
         let removingCurrent = offsets.contains(index)
+        let removedBefore = offsets.filter { $0 < index }.count
         queue.remove(atOffsets: offsets)
         guard !queue.isEmpty else { return stop() }
+        index = max(0, min(index - removedBefore, queue.count - 1))
         if removingCurrent {
-            index = min(index, queue.count - 1)
             startCurrent(from: 0)
-        } else if let playing, let newIndex = queue.firstIndex(of: playing) {
-            index = newIndex
+        } else {
             preparePlan()
         }
     }
 
     func toggleShuffle() {
+        cancelMix()
         shuffle.toggle()
         if shuffle {
             originalOrder = queue
@@ -370,18 +434,20 @@ final class MusicPlayer: ObservableObject {
     func togglePlayback() {
         guard current != nil else { return }
         if isPlaying {
-            userPaused = true
-            // Keep the engine running: scheduling on a paused engine throws.
-            if let vlc { vlc.pause() } else { decks.forEach { $0.pause() } }
+            pause()
         } else {
             userPaused = false
+            interrupted = false
             if let vlc {
                 vlc.play()
             } else if deck.file != nil {
                 try? AVAudioSession.sharedInstance().setActive(true)
-                if !engine.isRunning { try? engine.start() }
-                if deck.isActive || deck.currentTime > 0 {
+                if engine.isRunning, deck.isPaused {
+                    // Nothing was lost while paused: carry on.
                     decks.forEach { $0.resume() }
+                } else if deck.isPaused || deck.currentTime > 0 {
+                    // iOS stopped the engine meanwhile; bring it back.
+                    recoverEngine(resume: true)
                 } else {
                     startCurrent(from: 0)
                 }
@@ -389,6 +455,71 @@ final class MusicPlayer: ObservableObject {
                 startCurrent(from: 0)
             }
         }
+        refresh()
+    }
+
+    private func pause() {
+        userPaused = true
+        if mixPlan != nil {
+            // A blend runs on the clock and can't be frozen half-way; it
+            // is planned again and re-joined in time when you press Play.
+            cancelMix()
+            preparePlan()
+        }
+        // Keep the engine running: scheduling on a paused engine throws.
+        if let vlc { vlc.pause() } else { decks.forEach { $0.pause() } }
+    }
+
+    /// Brings sound back after iOS stopped the audio engine (earbuds
+    /// changed, a call, a long time in the background): restart it and put
+    /// the song back where it was, playing or paused.
+    private func recoverEngine(resume: Bool) {
+        guard vlc == nil, current != nil, deck.file != nil else { return }
+        let position = deck.currentTime
+        cancelMix()
+        try? AVAudioSession.sharedInstance().setActive(true)
+        if !engine.isRunning {
+            engine.prepare()
+            try? engine.start()
+        }
+        guard engine.isRunning else { return }
+        deck.play(from: position) { [weak self] in self?.trackEnded() }
+        if !resume { deck.pause() }
+        clock.set(elapsed: position, duration: deck.duration, running: resume, jumped: true)
+        refresh()
+        if nextPlan == nil { preparePlan() }
+    }
+
+    /// Call when the app comes back on screen: if the sound was taken away
+    /// while it was suspended, show the song as paused, ready to continue.
+    func sceneActive() {
+        guard current != nil, vlc == nil else { return }
+        if interrupted || (!userPaused && !engine.isRunning) {
+            interrupted = false
+            userPaused = true
+            decks.forEach { $0.pause() }
+            refresh()
+        }
+    }
+
+    // MARK: Sleep timer
+
+    /// Minutes until the music stops, or nil to turn the timer off.
+    func setSleepTimer(minutes: Int?) {
+        engine.mainMixerNode.outputVolume = 1
+        sleepTimer = minutes.map { .until(Date().addingTimeInterval(Double($0) * 60)) } ?? .off
+    }
+
+    func sleepAtEndOfSong() {
+        engine.mainMixerNode.outputVolume = 1
+        sleepTimer = .endOfSong
+    }
+
+    private func finishSleep() {
+        sleepTimer = .off
+        if isPlaying { pause() }
+        engine.mainMixerNode.outputVolume = 1
+        notice = "Sleep timer ended"
         refresh()
     }
 
@@ -441,7 +572,7 @@ final class MusicPlayer: ObservableObject {
             deck.play(from: target) { [weak self] in self?.trackEnded() }
             if userPaused { deck.pause() }
         }
-        clock.set(elapsed: target, duration: duration, running: isPlaying)
+        clock.set(elapsed: target, duration: duration, running: isPlaying, jumped: true)
         updateNowPlaying()
         // A started (or cancelled) mix used up the plan; plan it again.
         if nextPlan == nil { preparePlan() }
@@ -486,6 +617,7 @@ final class MusicPlayer: ObservableObject {
             if let analysis = await TrackAnalyzer.shared.analysis(for: track.url) { facts[track] = analysis }
         }
         guard queue == before else { return }
+        cancelMix()
         let sorted: [Track]
         switch order {
         case .tempo:
@@ -540,7 +672,7 @@ final class MusicPlayer: ObservableObject {
         artwork = nil
         artworkColor = nil
         isPlaying = false
-        clock.set(elapsed: 0, duration: 0, running: false)
+        clock.set(elapsed: 0, duration: 0, running: false, jumped: true)
         nextPlan = nil
         updateNowPlaying()
     }
@@ -562,7 +694,7 @@ final class MusicPlayer: ObservableObject {
             if !engine.isRunning { try engine.start() }
             Task { [weak self] in
                 guard let analysis = await TrackAnalyzer.shared.analysis(for: track.url),
-                      let self, self.current == track, !self.isMixing else { return }
+                      let self, self.current == track, self.mixPlan == nil else { return }
                 if self.mix.matchVolume { self.deck.trim.globalGain = self.mix.loudnessTrims(analysis, nil).0 }
             }
             deck.play(from: seconds) { [weak self] in self?.trackEnded() }
@@ -578,13 +710,16 @@ final class MusicPlayer: ObservableObject {
         preparePlan()
     }
 
-    private func setCurrent(_ track: Track) {
+    private func setCurrent(_ track: Track, playing: Bool = true) {
         current = track
         currentMeta = metaProvider?(track)
+        countedPlay = false
         if equalizer.enabled { updateAutoEQ(track) }
-        clock.set(elapsed: vlc == nil ? deck.currentTime : 0, duration: vlc == nil ? deck.duration : 0, running: true)
-        isPlaying = true
-        artwork = nil
+        clock.set(elapsed: vlc == nil ? deck.currentTime : 0, duration: vlc == nil ? deck.duration : 0,
+                  running: playing, jumped: true)
+        isPlaying = playing
+        // A cover already in memory shows at once, with no empty flash.
+        artwork = ArtworkResolver.cached(track, size: .large)
         loadArtwork(for: track)
         updateNowPlaying()
     }
@@ -607,8 +742,27 @@ final class MusicPlayer: ObservableObject {
     }
 
     private func trackEnded() {
-        guard !isMixing else { return }
+        guard mixPlan == nil else { return }
         skipDirection = 1
+        if sleepTimer == .endOfSong {
+            // Stop here, with the next song lined up for when you press Play.
+            sleepTimer = .off
+            vlc?.stop()
+            vlc = nil
+            decks.forEach { $0.unload() }
+            userPaused = true
+            if index + 1 < queue.count {
+                index += 1
+                setCurrent(queue[index], playing: false)
+                preparePlan()
+            } else {
+                isPlaying = false
+                clock.set(elapsed: 0, duration: duration, running: false, jumped: true)
+                updateNowPlaying()
+            }
+            notice = "Sleep timer ended"
+            return
+        }
         if repeatMode == .one {
             startCurrent(from: 0)
         } else if index + 1 < queue.count {
@@ -625,7 +779,7 @@ final class MusicPlayer: ObservableObject {
             decks.forEach { $0.unload() }
             isPlaying = false
             userPaused = true
-            clock.set(elapsed: 0, duration: duration, running: false)
+            clock.set(elapsed: 0, duration: duration, running: false, jumped: true)
             updateNowPlaying()
         }
     }
@@ -647,13 +801,16 @@ final class MusicPlayer: ObservableObject {
         guard vlc == nil, repeatMode != .one, let from = current, let to = upcoming,
               Self.engineReadable(to.url) else { return }
         let outDuration = deck.duration
-        guard mix.isOn else { return }
+        let mixing = mix.isOn
         planTask = Task { [weak self] in
             async let outAnalysis = TrackAnalyzer.shared.analysis(for: from.url)
             async let inAnalysis = TrackAnalyzer.shared.analysis(for: to.url)
             let (out, incoming) = await (outAnalysis, inAnalysis)
             guard let self, !Task.isCancelled, self.current == from, self.upcoming == to else { return }
-            self.nextPlan = self.mix.plan(from: from, out, to: to, incoming, outDuration: outDuration)
+            // With Mix off the songs still hand over without a gap.
+            self.nextPlan = mixing
+                ? self.mix.plan(from: from, out, to: to, incoming, outDuration: outDuration)
+                : TransitionPlan.gapless(at: outDuration, inGain: self.mix.loudnessTrims(nil, incoming).1)
         }
     }
 
@@ -662,20 +819,32 @@ final class MusicPlayer: ObservableObject {
     }
 
     private func beginMix(_ plan: TransitionPlan) {
-        guard let next = upcoming else { return }
+        guard let next = upcoming, engine.isRunning else { return }
         let incoming = otherDeck
         do { try incoming.load(next.url, engine: engine) } catch { return }
         incoming.trim.globalGain = plan.inGain
-        deck.trim.globalGain = plan.outGain
         incoming.timePitch.rate = plan.inRate
-        deck.setEcho(0, beat: plan.beat)
         mixPlan = plan
-        isMixing = true
-        applyAutomation(plan, at: 0)
-        incoming.play(from: plan.entry) { [weak self] in self?.trackEnded() }
-        // Start the clock from where the outgoing song really is, so the
-        // blend stays on the beat grid even if this tick ran late.
-        mixStartedAt = Date().addingTimeInterval(-max(0, deck.currentTime - plan.mixStart))
+        if plan.isGapless {
+            incoming.resetEffects()
+        } else {
+            deck.trim.globalGain = plan.outGain
+            deck.setEcho(0, beat: plan.beat)
+            isMixing = true
+            applyAutomation(plan, at: 0)
+        }
+        // The next song starts on an exact time on the audio clock, not
+        // "now": timers run tens of milliseconds late, enough to hear two
+        // kick drums land apart. `ahead` is how long until the blend point
+        // (negative if playback is already past it, after a seek).
+        let rate = Double(max(0.5, deck.timePitch.rate))
+        let ahead = (plan.mixStart - deck.currentTime) / rate
+        let late = max(0, -ahead)
+        mixStartedAt = Date().addingTimeInterval(ahead)
+        let when = ahead > 0.02
+            ? AVAudioTime(hostTime: mach_absolute_time() + AVAudioTime.hostTime(forSeconds: ahead))
+            : nil
+        incoming.play(from: plan.entry + late * Double(plan.inRate), at: when) { [weak self] in self?.trackEnded() }
     }
 
     /// Sets volume, bass EQ and effects for both decks at progress t.
@@ -708,10 +877,13 @@ final class MusicPlayer: ObservableObject {
 
     private func advanceMix(now: Date) {
         guard let plan = mixPlan, let started = mixStartedAt else { return }
-        let t = plan.length > 0 ? now.timeIntervalSince(started) / plan.length : 1
-        applyAutomation(plan, at: t)
-        let shown = (min(max(t, 0), 1) * 100).rounded() / 100
-        if clock.mixProgress != shown { clock.mixProgress = shown }
+        let since = now.timeIntervalSince(started)
+        let t = plan.length > 0 ? since / plan.length : (since >= 0 ? 1 : 0)
+        if !plan.isGapless {
+            applyAutomation(plan, at: t)
+            let shown = (min(max(t, 0), 1) * 50).rounded() / 50
+            if clock.mixProgress != shown { clock.mixProgress = shown }
+        }
         guard t >= 1 else { return }
 
         // Hand over to the incoming deck.
@@ -730,7 +902,7 @@ final class MusicPlayer: ObservableObject {
     }
 
     private func cancelMix() {
-        guard isMixing else { return }
+        guard mixPlan != nil else { return }
         otherDeck.unload()
         deck.resetEffects()
         clock.mixProgress = nil
@@ -746,8 +918,9 @@ final class MusicPlayer: ObservableObject {
         tickTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.tick()
-                // Automation runs finer while two songs are blending.
-                let interval = self?.isMixing == true ? 20 : 50
+                // Automation runs finer while two songs are blending, and
+                // there is little to do while paused.
+                let interval = self?.mixPlan != nil ? 20 : (self?.isPlaying == true ? 50 : 250)
                 do { try await Task.sleep(for: .milliseconds(interval)) } catch { return }
             }
         }
@@ -755,15 +928,29 @@ final class MusicPlayer: ObservableObject {
 
     private func tick() {
         let now = Date()
-        if isMixing { advanceMix(now: now) }
+        if mixPlan != nil { advanceMix(now: now) }
+        if case .until(let end) = sleepTimer {
+            // Fade out over the last ten seconds, then pause.
+            let left = end.timeIntervalSince(now)
+            if left <= 0 {
+                finishSleep()
+            } else if left < 10 {
+                engine.mainMixerNode.outputVolume = Float(left / 10)
+            }
+        }
+        if !countedPlay, isPlaying, let current, clock.duration > 0,
+           clock.elapsed >= min(clock.duration * 0.5, 240) {
+            countedPlay = true
+            playedProvider?(current)
+        }
         if let restore = rateRestore {
             // Ease a beat-matched song back to its natural speed over 8 s.
             let t = min(1, now.timeIntervalSince(restore.startedAt) / 8)
             deck.timePitch.rate = restore.from + (1 - restore.from) * Float(t)
             if t >= 1 { rateRestore = nil }
         }
-        if !isMixing, !userPaused, let plan = nextPlan, vlc == nil, deck.isActive,
-           deck.currentTime >= plan.mixStart, plan.length > 0 {
+        if mixPlan == nil, !userPaused, sleepTimer != .endOfSong, let plan = nextPlan, vlc == nil,
+           deck.isActive, deck.currentTime >= plan.mixStart - Self.mixLead {
             nextPlan = nil
             beginMix(plan)
         }
@@ -774,10 +961,13 @@ final class MusicPlayer: ObservableObject {
         // Assign only on change: every @Published write redraws its observers.
         if let vlc {
             let playing = vlc.isPlaying
-            if isPlaying != playing { isPlaying = playing }
+            let changed = isPlaying != playing
+            if changed { isPlaying = playing }
             clock.set(elapsed: Double(max(0, vlc.time.intValue)) / 1000,
                       duration: Double(max(0, vlc.media?.length.intValue ?? 0)) / 1000,
                       running: playing)
+            // The Lock Screen keeps its own clock; tell it about pause and play.
+            if changed { updateNowPlaying() }
             if isPlaying { vlcStarted = true }
             if vlc.state == .error, let track = current {
                 self.vlc = nil
@@ -790,8 +980,10 @@ final class MusicPlayer: ObservableObject {
             }
         } else {
             let playing = !userPaused && deck.file != nil && deck.isActive
-            if isPlaying != playing { isPlaying = playing }
+            let changed = isPlaying != playing
+            if changed { isPlaying = playing }
             clock.set(elapsed: deck.currentTime, duration: deck.duration, running: playing)
+            if changed { updateNowPlaying() }
         }
     }
 
@@ -869,7 +1061,7 @@ final class MusicPlayer: ObservableObject {
     private func loadArtwork(for track: Track) {
         let meta = currentMeta
         Task { [weak self] in
-            let image = await ArtworkResolver.shared.image(for: track, meta: meta)
+            let image = await ArtworkResolver.shared.image(for: track, meta: meta, size: .large)
             let color = await Task.detached(priority: .userInitiated) { image.flatMap(ArtworkPalette.color) }.value
             guard let self, self.current == track else { return }
             self.artwork = image
@@ -886,15 +1078,27 @@ final class MusicPlayer: ObservableObject {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyPlaybackDuration: duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: clock.elapsed(at: Date()),
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackQueueIndex: index,
+            MPNowPlayingInfoPropertyPlaybackQueueCount: queue.count
         ]
         if let artist = currentMeta?.artist { info[MPMediaItemPropertyArtist] = artist }
         info[MPMediaItemPropertyAlbumTitle] = currentMeta?.album ?? current?.folder
         if let artwork {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in artwork }
+            // Built once per cover, not on every update.
+            if lockScreenArtwork?.image !== artwork {
+                lockScreenArtwork = (artwork, Self.lockScreenItem(artwork))
+            }
+            info[MPMediaItemPropertyArtwork] = lockScreenArtwork?.item
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// iOS asks for the picture on its own thread, so this is made outside
+    /// the main actor.
+    nonisolated private static func lockScreenItem(_ image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 
     private func observeSession() {
@@ -907,17 +1111,53 @@ final class MusicPlayer: ObservableObject {
                     .map { AVAudioSession.InterruptionOptions(rawValue: $0) } ?? []
                 Task { @MainActor in
                     guard let self else { return }
-                    if type == .began, self.isPlaying { self.togglePlayback() }
-                    if type == .ended, options.contains(.shouldResume), !self.isPlaying { self.togglePlayback() }
+                    if type == .began, self.isPlaying {
+                        self.pause()
+                        self.interrupted = true
+                        self.refresh()
+                    }
+                    // Only continue what the interruption itself stopped,
+                    // never something you had paused yourself.
+                    if type == .ended, self.interrupted {
+                        self.interrupted = false
+                        if options.contains(.shouldResume) { self.togglePlayback() }
+                    }
                 }
             }
             .store(in: &cancellables)
+        // Earbuds taken out or switched off: pause instead of carrying on
+        // out loud through the speaker.
+        center.publisher(for: AVAudioSession.routeChangeNotification)
+            .sink { [weak self] note in
+                let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                    .flatMap { AVAudioSession.RouteChangeReason(rawValue: $0) }
+                guard reason == .oldDeviceUnavailable else { return }
+                Task { @MainActor in
+                    guard let self, self.isPlaying else { return }
+                    self.pause()
+                    self.refresh()
+                }
+            }
+            .store(in: &cancellables)
+        // The output changed and iOS stopped the engine. Restart it and put
+        // the song back in place. (This used to call play on the idle second
+        // deck, which crashes.) The short wait lets the pause above go first.
         center.publisher(for: .AVAudioEngineConfigurationChange, object: engine)
             .sink { [weak self] _ in
                 Task { @MainActor in
-                    guard let self, !self.userPaused, self.current != nil, self.vlc == nil else { return }
-                    try? self.engine.start()
-                    self.decks.forEach { $0.player.play() }
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard let self, self.current != nil, self.vlc == nil else { return }
+                    self.recoverEngine(resume: !self.userPaused && !self.interrupted)
+                }
+            }
+            .store(in: &cancellables)
+        center.publisher(for: AVAudioSession.mediaServicesWereResetNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                    self.userPaused = true
+                    self.recoverEngine(resume: false)
                 }
             }
             .store(in: &cancellables)

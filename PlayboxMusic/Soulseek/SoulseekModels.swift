@@ -12,24 +12,32 @@ struct SlskSearchResult: Identifiable, Hashable, Sendable {
     let uploadSpeed: UInt32
     let queueLength: UInt32
 
-    var id: String { username + "\u{1F}" + filename }
+    // Worked out once when the result arrives: lists sort and filter
+    // thousands of these, and splitting the path every time was slow.
+    let id: String
+    let title: String
+    let folder: String
+    let fileExtension: String
 
-    /// Soulseek paths use backslashes regardless of the sharer's platform.
-    private var components: [String] {
-        filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).map(String.init)
-    }
-
-    var title: String {
+    init(username: String, filename: String, size: UInt64, bitrate: UInt32?, duration: UInt32?,
+         sampleRate: UInt32?, bitDepth: UInt32?, freeSlots: Bool, uploadSpeed: UInt32, queueLength: UInt32) {
+        self.username = username
+        self.filename = filename
+        self.size = size
+        self.bitrate = bitrate
+        self.duration = duration
+        self.sampleRate = sampleRate
+        self.bitDepth = bitDepth
+        self.freeSlots = freeSlots
+        self.uploadSpeed = uploadSpeed
+        self.queueLength = queueLength
+        // Soulseek paths use backslashes regardless of the sharer's platform.
+        let components = filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).map(String.init)
         let name = components.last ?? filename
-        return (name as NSString).deletingPathExtension
-    }
-
-    var folder: String {
-        components.dropLast().suffix(2).joined(separator: " / ")
-    }
-
-    var fileExtension: String {
-        ((components.last ?? filename) as NSString).pathExtension.lowercased()
+        id = username + "\u{1F}" + filename
+        title = (name as NSString).deletingPathExtension
+        folder = components.dropLast().suffix(2).joined(separator: " / ")
+        fileExtension = (name as NSString).pathExtension.lowercased()
     }
 
     var isAudio: Bool { SlskAudio.extensions.contains(fileExtension) }

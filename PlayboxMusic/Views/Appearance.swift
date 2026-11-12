@@ -19,7 +19,16 @@ final class Appearance {
 
     /// Read live from settings every time, so nothing can hold a stale colour.
     var accentHex: String { UserDefaults.standard.string(forKey: Self.accentKey) ?? Self.defaultAccent }
-    var accentUIColor: UIColor { UIColor(somaHex: accentHex) }
+    private var parsed: (hex: String, color: UIColor)?
+
+    /// Parsed once per colour, not on every use (rows ask for it constantly).
+    var accentUIColor: UIColor {
+        let hex = accentHex
+        if let parsed, parsed.hex == hex { return parsed.color }
+        let color = UIColor(somaHex: hex)
+        parsed = (hex, color)
+        return color
+    }
 }
 
 extension UIColor {

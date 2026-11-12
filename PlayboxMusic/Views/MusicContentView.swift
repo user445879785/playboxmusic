@@ -1,9 +1,13 @@
+import Combine
 import SwiftUI
 
+/// The app's frame: four pages and the glass dock. It holds the client,
+/// library and player as plain references on purpose: watching them here
+/// would rebuild every page each time a download ticks or a song changes.
 struct MusicContentView: View {
-    @EnvironmentObject private var client: SoulseekClient
-    @EnvironmentObject private var library: MusicLibrary
-    @EnvironmentObject private var player: MusicPlayer
+    let client: SoulseekClient
+    let library: MusicLibrary
+    let player: MusicPlayer
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("playbox.music.username") private var username = ""
     @StateObject private var updater = UpdateChecker()
@@ -12,16 +16,6 @@ struct MusicContentView: View {
     @AppStorage(Appearance.transparencyKey) private var dockTransparency = 0.5
     @AppStorage(Appearance.scaleKey) private var dockScale = 1.0
     @State private var tab = "search"
-
-    private var tabs: [ChromeTab] {
-        [
-            ChromeTab(id: "search", title: "Search", symbol: "magnifyingglass"),
-            ChromeTab(id: "downloads", title: "Downloads", symbol: "arrow.down.circle",
-                      badge: client.transfers.filter(\.state.isActive).count),
-            ChromeTab(id: "library", title: "Library", symbol: "music.note.list"),
-            ChromeTab(id: "settings", title: "Settings", symbol: "gearshape")
-        ]
-    }
 
     var body: some View {
         let dockHeight = GlassDock.baseHeight * dockScale
@@ -32,18 +26,20 @@ struct MusicContentView: View {
         // pages and fading them didn't switch on iOS 26.)
         // Each page keeps clear of the dock, with the mini player just above it.
         let clearance = max(0, dockHeight + bottom - safeBottom + 6)
+        // A new accent repaints the music pages. Settings is left alone: it
+        // reads the colour live, so the picker isn't torn down mid-drag.
         TabView(selection: $tab) {
             NavigationStack { MusicSearchView() }.withMiniPlayer()
-                .dockClearance(clearance).tag("search")
+                .dockClearance(clearance).id(accentHex).tag("search")
             NavigationStack { DownloadsView() }.withMiniPlayer()
-                .dockClearance(clearance).tag("downloads")
+                .dockClearance(clearance).id(accentHex).tag("downloads")
             NavigationStack { MusicLibraryView() }.withMiniPlayer()
-                .dockClearance(clearance).tag("library")
+                .dockClearance(clearance).id(accentHex).tag("library")
             NavigationStack { MusicAccountView() }
                 .dockClearance(clearance).tag("settings")
         }
         .overlay(alignment: .bottom) {
-            GlassDock(tabs: tabs, selection: $tab, accent: Color(uiColor: UIColor(somaHex: accentHex)),
+            DockLayer(selection: $tab, accent: Color(uiColor: UIColor(somaHex: accentHex)),
                       transparency: dockTransparency, scale: dockScale)
                 .frame(height: dockHeight)
                 .padding(.horizontal, 14)
@@ -52,8 +48,6 @@ struct MusicContentView: View {
                 // Sits on the screen's edge and stays put (behind) when the keyboard opens.
                 .ignoresSafeArea(edges: .bottom)
         }
-        // A new accent repaints every screen.
-        .id(accentHex)
         .preferredColorScheme(.dark)
         .tint(.brand)
         .environmentObject(updater)
@@ -63,29 +57,40 @@ struct MusicContentView: View {
         // "Open in Playbox Music" from Files, Safari downloads or AirDrop.
         .onOpenURL { url in
             guard url.isFileURL else { return }
-            if library.importFiles([url]) > 0 { library.reload() }
+            Task { await library.importFiles([url]) }
         }
         .task { await updater.checkAutomatically() }
         .task {
             player.metaProvider = { [library] track in library.meta(for: track) }
             player.similarProvider = { [library] track, played in library.similar(to: track, excluding: played) }
             player.skipProvider = { [library] track in library.isSkipped(track) }
-            client.onDownloadFinished = { url, play, meta in
+            player.playedProvider = { [library] track in library.recordPlay(track) }
+            client.onDownloadFinished = { [library, player] url, play, meta in
                 if let meta { library.setMeta(meta, for: url) }
-                library.reload()
-                guard play else { return }
-                let tracks = library.tracks
-                if let start = tracks.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
-                    player.play(tracks, startAt: start)
-                } else {
-                    player.play([library.track(for: url)], startAt: 0)
+                Task {
+                    await library.refresh()
+                    guard play else { return }
+                    let tracks = library.tracks
+                    if let start = tracks.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
+                        player.play(tracks, startAt: start)
+                    } else {
+                        player.play([library.track(for: url)], startAt: 0)
+                    }
                 }
             }
             await reconnectIfNeeded()
         }
-        .onChange(of: library.metadata) { _, _ in player.refreshMeta() }
+        // Details read after a song started (tags, catalog) reach the player.
+        .onReceive(library.$metadata.dropFirst().receive(on: DispatchQueue.main)) { _ in player.refreshMeta() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await reconnectIfNeeded() } }
+            if phase == .active {
+                // Sound and sockets don't survive a long suspension.
+                player.sceneActive()
+                client.sceneActive()
+                Task { await reconnectIfNeeded() }
+            } else if phase == .background {
+                library.flush()
+            }
         }
     }
 
@@ -104,14 +109,50 @@ struct MusicContentView: View {
     }
 }
 
+/// The dock with its Downloads badge. Only this small view watches the
+/// number of running downloads.
+private struct DockLayer: View {
+    @EnvironmentObject private var badge: DownloadBadge
+    @Binding var selection: String
+    let accent: Color
+    let transparency: Double
+    let scale: Double
+
+    var body: some View {
+        GlassDock(tabs: [
+            ChromeTab(id: "search", title: "Search", symbol: "magnifyingglass"),
+            ChromeTab(id: "downloads", title: "Downloads", symbol: "arrow.down.circle", badge: badge.active),
+            ChromeTab(id: "library", title: "Library", symbol: "music.note.list"),
+            ChromeTab(id: "settings", title: "Settings", symbol: "gearshape")
+        ], selection: $selection, accent: accent, transparency: transparency, scale: scale)
+    }
+}
+
+extension View {
+    /// Hands the Soulseek client on to a sheet, without making the view
+    /// that presents it redraw on every download update.
+    @ViewBuilder
+    func soulseekObjects(_ client: SoulseekClient?) -> some View {
+        if let client {
+            environmentObject(client)
+                .environmentObject(client.checks)
+                .environmentObject(client.badge)
+                .environment(\.soulseek, client)
+        } else {
+            self
+        }
+    }
+}
+
 /// Floating mini player tinted from the artwork: swipe for next/previous,
 /// swipe up or tap to open, star, play and a progress line.
 private struct MiniPlayerInset: ViewModifier {
     @EnvironmentObject private var player: MusicPlayer
     @EnvironmentObject private var library: MusicLibrary
-    @EnvironmentObject private var client: SoulseekClient
+    @Environment(\.soulseek) private var soulseek
     @State private var showNowPlaying = false
     @State private var dragOffset: CGFloat = 0
+    @GestureState private var touching = false
 
     func body(content: Content) -> some View {
         content.safeAreaInset(edge: .bottom, spacing: 0) {
@@ -122,6 +163,19 @@ private struct MiniPlayerInset: ViewModifier {
                 }
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: player.current == nil)
+            // Presented from here, not from the bar: the bar goes away when
+            // the queue ends, and a sheet must not lose what it hangs on.
+            .fullScreenCover(isPresented: $showNowPlaying) {
+                NowPlayingView(onSwipeClose: {
+                    // The swipe already slid the page off screen; skip the system slide.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { showNowPlaying = false }
+                })
+                    .environmentObject(player)
+                    .environmentObject(library)
+                    .soulseekObjects(soulseek)
+            }
         }
     }
 
@@ -206,31 +260,34 @@ private struct MiniPlayerInset: ViewModifier {
         .contentShape(Rectangle())
         .onTapGesture { showNowPlaying = true }
         .gesture(
-            DragGesture(minimumDistance: 20)
+            DragGesture(minimumDistance: 12)
+                .updating($touching) { _, state, _ in state = true }
                 .onChanged { value in
                     guard abs(value.translation.width) > abs(value.translation.height) else { return }
                     dragOffset = value.translation.width
                 }
                 .onEnded { value in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { dragOffset = 0 }
-                    if value.translation.width < -70 { player.next() }
-                    if value.translation.width > 70 { player.previous() }
-                    if value.translation.height < -50, abs(value.translation.width) < 40 { showNowPlaying = true }
+                    // Where the flick is heading decides, so a short fast
+                    // swipe counts as much as a long slow one.
+                    let sideways = abs(value.translation.width) > abs(value.translation.height)
+                    let across = value.translation.width + Fluid.project(value.velocity.width, deceleration: 0.99)
+                    let up = value.translation.height + Fluid.project(value.velocity.height, deceleration: 0.99)
+                    withAnimation(.interpolatingSpring(duration: 0.3, bounce: 0.1,
+                                                       initialVelocity: Fluid.relative(value.velocity.width, from: dragOffset, to: 0))) {
+                        dragOffset = 0
+                    }
+                    if sideways {
+                        if across < -90 { player.next() } else if across > 90 { player.previous() }
+                    } else if up < -60 {
+                        showNowPlaying = true
+                    }
                 }
         )
+        .onDragCancelled(touching, stillBusy: { dragOffset != 0 }) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragOffset = 0 }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Open Now Playing") { showNowPlaying = true }
-        .fullScreenCover(isPresented: $showNowPlaying) {
-            NowPlayingView(onSwipeClose: {
-                // The swipe already slid the page off screen; skip the system slide.
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { showNowPlaying = false }
-            })
-                .environmentObject(player)
-                .environmentObject(library)
-                .environmentObject(client)
-        }
     }
 }
 
@@ -240,12 +297,13 @@ private struct MiniProgressLine: View {
 
     var body: some View {
         TimelineView(.animation(paused: !clock.running)) { context in
-            GeometryReader { proxy in
-                let progress = clock.duration > 0 ? min(1, clock.elapsed(at: context.date) / clock.duration) : 0
-                Capsule().fill(.white.opacity(0.9)).frame(width: proxy.size.width * progress, height: 2)
-            }
+            let progress = clock.duration > 0 ? min(1, clock.elapsed(at: context.date) / clock.duration) : 0
+            // Stretched, not re-laid-out: the cheapest way to move a line every frame.
+            Rectangle().fill(.white.opacity(0.9))
+                .scaleEffect(x: progress, y: 1, anchor: .leading)
         }
         .frame(height: 2)
+        .clipShape(Capsule())
     }
 }
 

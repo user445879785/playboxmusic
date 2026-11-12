@@ -1,6 +1,7 @@
+import CryptoKit
 import Foundation
 
-struct LyricLine: Identifiable, Equatable {
+struct LyricLine: Identifiable, Equatable, Codable, Sendable {
     let id: Int
     let time: Double?
     let text: String
@@ -17,10 +18,57 @@ actor LyricsService {
     }
 
     private var cache: [String: [LyricLine]] = [:]
+    /// Lyrics that were found are kept on the phone (Application Support),
+    /// so they open instantly, work offline and can be searched.
+    private let directory: URL
+    /// Every saved song's words (key → text), loaded the first time you
+    /// search the library by lyrics.
+    private var texts: [String: String]?
+
+    private struct Saved: Codable {
+        var key: String
+        var lines: [LyricLine]
+    }
+
+    init() {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let folder = support.appendingPathComponent("Lyrics", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        directory = folder
+    }
+
+    /// How a song's lyrics are filed: by artist and title, ignoring case.
+    static func key(title: String, artist: String?) -> String {
+        [artist ?? "", title].joined(separator: "|").lowercased()
+    }
+
+    private func file(for key: String) -> URL {
+        let name = SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent(name + ".json")
+    }
+
+    /// The words of every song whose lyrics are saved, for library search.
+    func savedTexts() -> [String: String] {
+        if let texts { return texts }
+        var loaded: [String: String] = [:]
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let saved = try? JSONDecoder().decode(Saved.self, from: data) else { continue }
+            loaded[saved.key] = saved.lines.map(\.text).joined(separator: "\n")
+        }
+        texts = loaded
+        return loaded
+    }
 
     func lyrics(title: String, artist: String?, album: String?, duration: Double?) async -> [LyricLine] {
-        let key = [artist ?? "", title].joined(separator: "|").lowercased()
+        let key = Self.key(title: title, artist: artist)
         if let cached = cache[key] { return cached }
+        if let data = try? Data(contentsOf: file(for: key)),
+           let saved = try? JSONDecoder().decode(Saved.self, from: data), !saved.lines.isEmpty {
+            cache[key] = saved.lines
+            return saved.lines
+        }
 
         var lines: [LyricLine] = []
         if let artist {
@@ -40,6 +88,13 @@ actor LyricsService {
             }
         }
         cache[key] = lines
+        // Only real lyrics are saved; a miss is asked again another day.
+        if lines.contains(where: { $0.text != "♪ Instrumental ♪" }) {
+            if let data = try? JSONEncoder().encode(Saved(key: key, lines: lines)) {
+                try? data.write(to: file(for: key), options: .atomic)
+            }
+            texts?[key] = lines.map(\.text).joined(separator: "\n")
+        }
         return lines
     }
 

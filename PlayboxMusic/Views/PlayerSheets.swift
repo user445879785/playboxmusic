@@ -14,6 +14,8 @@ struct EqualizerView: View {
 private struct EqualizerForm: View {
     @ObservedObject var equalizer: EqualizerSettings
     let songTitle: String?
+    /// True while a band is held, so the sheet doesn't scroll under the finger.
+    @State private var bandHeld = false
 
     var body: some View {
         NavigationStack {
@@ -51,6 +53,7 @@ private struct EqualizerForm: View {
                 }
                 .padding()
             }
+            .scrollDisabled(bandHeld)
             .navigationTitle("Equalizer")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -174,15 +177,9 @@ private struct EqualizerForm: View {
                 VStack(spacing: 6) {
                     Text(String(format: "%+.0f", curve[band]))
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                    Slider(value: Binding(
-                        get: { Double(curve[band]) },
-                        set: { equalizer.setBand(band, Float($0)) }
-                    ), in: -12...12)
-                    .tint(editable ? Color.brand : .white.opacity(0.6))
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: 170, height: 28)
-                    .frame(width: 30, height: 170)
-                    .accessibilityLabel("\(label(EqualizerSettings.frequencies[band])) band")
+                    BandSlider(value: curve[band], tint: editable ? Color.brand : .white.opacity(0.6),
+                               held: $bandHeld) { equalizer.setBand(band, $0) }
+                        .accessibilityLabel("\(label(EqualizerSettings.frequencies[band])) band")
                     Text(label(EqualizerSettings.frequencies[band]))
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
@@ -193,6 +190,68 @@ private struct EqualizerForm: View {
 
     private func label(_ frequency: Float) -> String {
         frequency >= 1000 ? "\(Int(frequency / 1000))k" : "\(Int(frequency))"
+    }
+}
+
+/// One vertical EQ band. A real vertical control instead of a rotated
+/// slider: it moves with the finger from where it was grabbed (the full
+/// height is the full ±12 dB) and takes the drag away from the sheet, so
+/// moving a band never scrolls the page.
+private struct BandSlider: View {
+    let value: Float
+    let tint: Color
+    @Binding var held: Bool
+    let onChange: (Float) -> Void
+    @State private var grabbedAt: Float?
+    @GestureState private var touching = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let knob: CGFloat = grabbedAt == nil ? 18 : 24
+            let travel = max(1, proxy.size.height - 24)
+            let fraction = CGFloat((min(12, max(-12, value)) + 12) / 24)
+            ZStack(alignment: .bottom) {
+                Capsule().fill(.white.opacity(0.14)).frame(width: 4)
+                Capsule().fill(tint).frame(width: 4, height: 12 + travel * fraction)
+                Circle().fill(.white)
+                    .frame(width: knob, height: knob)
+                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                    .offset(y: -(12 + travel * fraction) + knob / 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, state, _ in state = true }
+                    .onChanged { drag in
+                        if grabbedAt == nil {
+                            grabbedAt = value
+                            held = true
+                        }
+                        var next = (grabbedAt ?? 0) + Float(-drag.translation.height / travel) * 24
+                        next = min(12, max(-12, next))
+                        // Settles on flat when it is close.
+                        if abs(next) < 0.4 { next = 0 }
+                        onChange(next)
+                    }
+                    .onEnded { _ in
+                        grabbedAt = nil
+                        held = false
+                    }
+            )
+            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: grabbedAt != nil)
+        }
+        .frame(width: 30, height: 170)
+        .onDragCancelled(touching, stillBusy: { grabbedAt != nil }) {
+            grabbedAt = nil
+            held = false
+        }
+        .sensoryFeedback(.selection, trigger: value == 0)
+        .accessibilityElement()
+        .accessibilityValue(String(format: "%+.0f decibels", value))
+        .accessibilityAdjustableAction { direction in
+            onChange(min(12, max(-12, value + (direction == .increment ? 1 : -1))))
+        }
     }
 }
 

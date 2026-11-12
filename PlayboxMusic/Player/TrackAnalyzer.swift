@@ -102,6 +102,10 @@ actor TrackAnalyzer {
     static let shared = TrackAnalyzer()
 
     private var memory: [String: TrackAnalysis] = [:]
+    /// Only the latest few analyses stay in memory (each holds a whole
+    /// waveform); the rest are read back from disk when needed.
+    private var recent: [String] = []
+    private var durations: [String: Double] = [:]
     private var running: [String: Task<TrackAnalysis?, Never>] = [:]
     private let directory: URL
     /// Decoding a whole song is heavy; a long queue analyses two at a time.
@@ -125,7 +129,7 @@ actor TrackAnalyzer {
         if let value = memory[key] { return value }
         let file = directory.appendingPathComponent(key + ".json")
         if let data = try? Data(contentsOf: file), let value = try? JSONDecoder().decode(TrackAnalysis.self, from: data) {
-            memory[key] = value
+            remember(key, value)
             return value
         }
         if let task = running[key] { return await task.value }
@@ -139,9 +143,30 @@ actor TrackAnalyzer {
         let value = await task.value
         running[key] = nil
         if let value {
-            memory[key] = value
+            remember(key, value)
             if let data = try? JSONEncoder().encode(value) { try? data.write(to: file) }
         }
+        return value
+    }
+
+    private func remember(_ key: String, _ value: TrackAnalysis) {
+        memory[key] = value
+        durations[key] = value.duration
+        recent.removeAll { $0 == key }
+        recent.append(key)
+        while recent.count > 12 { memory[recent.removeFirst()] = nil }
+    }
+
+    /// A song's length read from the file's header, without decoding it.
+    /// (Adding up a queue used to analyse every song in it.)
+    func duration(for url: URL) async -> Double? {
+        let key = Self.key(url)
+        if let known = durations[key] { return known }
+        let value = await Task.detached(priority: .utility) { () -> Double? in
+            guard let file = try? AVAudioFile(forReading: url), file.processingFormat.sampleRate > 0 else { return nil }
+            return Double(file.length) / file.processingFormat.sampleRate
+        }.value
+        if let value { durations[key] = value }
         return value
     }
 

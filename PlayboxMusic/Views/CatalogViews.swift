@@ -222,7 +222,6 @@ struct AvailabilityBadge: View {
 }
 
 /// A song with cover, preview on tap, downloaded mark and GET button.
-/// Checked on Soulseek as it appears, and left out when no one shares it.
 struct SongRow: View {
     @EnvironmentObject private var library: MusicLibrary
     @ObservedObject private var preview = PreviewPlayer.shared
@@ -330,8 +329,9 @@ struct AlbumDetailView: View {
 
     private var header: some View {
         ZStack {
-            // Blurred cover behind the header, fading into the page.
-            CatalogArtwork(url: album.artworkURL(size: 300), size: 420)
+            // Blurred cover behind the header, fading into the page. A small
+            // picture is plenty under a blur this strong.
+            CatalogArtwork(url: album.artworkURL(size: 100), size: 420)
                 .blur(radius: 50)
                 .opacity(0.45)
                 .frame(maxWidth: .infinity)
@@ -557,17 +557,29 @@ private struct FetchButton: View {
 struct CatalogArtwork: View {
     let url: URL?
     let size: CGFloat
+    @State private var loaded: (url: URL, image: UIImage)?
 
+    // Covers go through the same shrink-and-cache path as the library's,
+    // so they are decoded off the main thread and don't flash when you
+    // scroll back to them.
     var body: some View {
-        AsyncImage(url: url) { image in
-            image.resizable().scaledToFill()
-        } placeholder: {
-            Color(white: 0.14).overlay {
-                Image(systemName: "music.note").foregroundStyle(.white.opacity(0.35))
+        let bucket = ArtworkResolver.Size.fitting(size)
+        let image = url.flatMap { loaded?.url == $0 ? loaded?.image : ArtworkResolver.cached($0, size: bucket) }
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Color(white: 0.14).overlay {
+                    Image(systemName: "music.note").foregroundStyle(.white.opacity(0.35))
+                }
             }
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: size * 0.05))
+        .task(id: url) {
+            guard let url, let image = await ArtworkResolver.shared.remoteImage(url, size: bucket) else { return }
+            loaded = (url, image)
+        }
     }
 }
 

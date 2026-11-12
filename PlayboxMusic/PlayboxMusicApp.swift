@@ -13,9 +13,10 @@ struct PlayboxMusicApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MusicContentView()
+            MusicContentView(client: client, library: library, player: player)
                 .environmentObject(client)
                 .environmentObject(client.checks)
+                .environmentObject(client.badge)
                 .environment(\.soulseek, client)
                 .environmentObject(library)
                 .environmentObject(player)

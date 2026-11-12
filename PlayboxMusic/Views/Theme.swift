@@ -67,14 +67,16 @@ struct TrackFacts: View {
 struct PlayingBars: View {
     var active: Bool
     var color: Color = .brand
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(paused: !active)) { context in
+        TimelineView(.animation(paused: !active || reduceMotion)) { context in
             let time = context.date.timeIntervalSinceReferenceDate
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(0..<3, id: \.self) { bar in
                     let phase = time * (4.5 + Double(bar) * 1.9) + Double(bar) * 1.3
-                    let level = active ? 0.3 + 0.7 * abs(sin(phase)) : 0.3
+                    let level = reduceMotion ? (active ? 0.5 + 0.2 * Double(bar % 2) : 0.3)
+                        : (active ? 0.3 + 0.7 * abs(sin(phase)) : 0.3)
                     Capsule().fill(color).frame(width: 3, height: 14 * level)
                 }
             }
@@ -90,6 +92,7 @@ struct GlowPlayButton: View {
     var size: CGFloat = 56
     let action: () -> Void
     @State private var breathing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -117,6 +120,7 @@ struct GlowPlayButton: View {
         .buttonStyle(PressScaleStyle())
         .accessibilityLabel(isPlaying ? "Pause" : "Play")
         .onAppear {
+            guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { breathing = true }
         }
     }

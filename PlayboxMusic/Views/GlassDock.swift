@@ -48,14 +48,16 @@ struct GlassDock: View {
         .frame(height: Self.baseHeight * scale)
         .background { capsule }
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        // Only the dock animates. Wrapping the tab change itself in an
+        // animation made the page you switch to animate in as well.
+        .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.28, dampingFraction: 0.78),
+                   value: selection)
         .sensoryFeedback(.selection, trigger: selection)
     }
 
     private func select(_ id: String) {
         guard id != selection else { return }
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.28, dampingFraction: 0.78)) {
-            selection = id
-        }
+        selection = id
     }
 
     private func cell(_ tab: ChromeTab) -> some View {
@@ -100,7 +102,7 @@ struct GlassDock: View {
         if #available(iOS 26.0, *), !reduceTransparency {
             Capsule()
                 .fill(.clear)
-                .glassEffect(.regular.tint(accent.opacity(0.22)).interactive(), in: .capsule)
+                .glassEffect(.regular.tint(accent.opacity(0.36)).interactive(), in: .capsule)
         } else {
             fallbackPill
         }
@@ -111,8 +113,8 @@ struct GlassDock: View {
 
     private var fallbackPill: some View {
         Capsule()
-            .fill(accent.opacity(0.18))
-            .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
+            .fill(accent.opacity(0.26))
+            .overlay(Capsule().strokeBorder(accent.opacity(0.35), lineWidth: 1))
     }
 
     /// The dock's glass. Below the middle it fills in towards solid; above
@@ -127,7 +129,9 @@ struct GlassDock: View {
             if #available(iOS 26.0, *), !reduceTransparency {
                 Capsule()
                     .fill(.clear)
-                    .glassEffect(transparency > 0.75 ? .clear : .regular, in: .capsule)
+                    // The whole dock takes a faint wash of the accent colour.
+                    .glassEffect((transparency > 0.75 ? Glass.clear : Glass.regular).tint(accent.opacity(0.14)),
+                                 in: .capsule)
             } else {
                 Capsule().fill(.ultraThinMaterial)
             }
@@ -135,6 +139,8 @@ struct GlassDock: View {
             Capsule().fill(.ultraThinMaterial)
             #endif
             Capsule().fill(Color.black.opacity(solid * 0.92))
+            Capsule().fill(accent.opacity(0.07))
+            Capsule().strokeBorder(accent.opacity(0.22), lineWidth: 1)
         }
     }
 }

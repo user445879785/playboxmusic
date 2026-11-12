@@ -102,7 +102,7 @@ final class SlskSocket: @unchecked Sendable {
     }
 
     /// Reads one length-prefixed frame and returns its payload.
-    func readFrame(limit: Int = 64 * 1024 * 1024) async throws -> Data {
+    func readFrame(limit: Int = 16 * 1024 * 1024) async throws -> Data {
         let length = Int(try await readU32())
         guard length <= limit else { throw SocketError.frameTooLarge }
         return try await receive(exactly: length)

@@ -10,7 +10,7 @@ import SwiftUI
 struct NowPlayingView: View {
     @EnvironmentObject private var player: MusicPlayer
     @EnvironmentObject private var library: MusicLibrary
-    @EnvironmentObject private var client: SoulseekClient
+    @Environment(\.soulseek) private var soulseek
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Closes without the system animation, after a swipe already moved the page away.
@@ -64,7 +64,8 @@ struct NowPlayingView: View {
                     }
                 }
                 .frame(height: side)
-                .animation(.spring(response: 0.5, dampingFraction: 0.86), value: player.current)
+                .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.5, dampingFraction: 0.86),
+                           value: player.current)
                 Spacer(minLength: 20)
                 titleRow
               }
@@ -117,7 +118,7 @@ struct NowPlayingView: View {
             }
             .environmentObject(player)
             .environmentObject(library)
-            .environmentObject(client)
+            .soulseekObjects(soulseek)
         }
         .task(id: player.current) { await loadLyrics() }
     }
@@ -169,6 +170,17 @@ struct NowPlayingView: View {
             AddToPlaylistMenu(track: track) { namingPlaylist = true }
         }
         Button { sheet = .queue } label: { Label("Up Next", systemImage: "list.bullet") }
+        Menu {
+            ForEach([10, 20, 30, 45, 60], id: \.self) { minutes in
+                Button("\(minutes) Minutes") { player.setSleepTimer(minutes: minutes) }
+            }
+            Button("End of This Song") { player.sleepAtEndOfSong() }
+            if player.sleepTimer != .off {
+                Button("Turn Off", role: .destructive) { player.setSleepTimer(minutes: nil) }
+            }
+        } label: {
+            Label(sleepLabel, systemImage: player.sleepTimer == .off ? "moon" : "moon.fill")
+        }
         if player.upcoming != nil {
             Button { sheet = .mix } label: { Label("Edit Transition", systemImage: "slider.horizontal.3") }
         }
@@ -331,6 +343,15 @@ struct NowPlayingView: View {
         }
     }
 
+    private var sleepLabel: String {
+        switch player.sleepTimer {
+        case .off: return "Sleep Timer"
+        case .endOfSong: return "Sleep Timer · End of Song"
+        case .until(let end):
+            return "Sleep Timer · \(max(1, Int((end.timeIntervalSinceNow / 60).rounded(.up)))) min"
+        }
+    }
+
     // MARK: Actions
 
     private func like() {
@@ -376,7 +397,7 @@ private struct MixStatusPill: View {
                 }
                 .foregroundStyle(.black)
                 .background(Color.brand, in: Capsule())
-            } else if player.mix.isOn, let plan = player.nextPlan {
+            } else if player.mix.isOn, let plan = player.nextPlan, !plan.isGapless {
                 pill(progress: nil) {
                     Image(systemName: "sparkles")
                     Text("Next: \(plan.preset?.rawValue ?? "Custom") · \(plan.bars) bars")
@@ -452,6 +473,8 @@ private struct CoverView<MenuContent: View>: View {
     @State private var dragOffset: CGFloat = 0
     @State private var dragAxis: Axis?
     @State private var heartBurst = false
+    @GestureState private var touching = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -482,10 +505,10 @@ private struct CoverView<MenuContent: View>: View {
                 .allowsHitTesting(false)
         }
         // Settles back slightly while paused, like Apple Music.
-        .scaleEffect(player.isPlaying ? 1 : 0.86)
+        .scaleEffect(player.isPlaying || reduceMotion ? 1 : 0.86)
         .animation(.spring(response: 0.45, dampingFraction: 0.68), value: player.isPlaying)
         .offset(x: dragOffset)
-        .rotationEffect(.degrees(Double(dragOffset) / 40))
+        .rotationEffect(.degrees(reduceMotion ? 0 : Double(dragOffset) / 40))
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
             onLike()
@@ -499,6 +522,7 @@ private struct CoverView<MenuContent: View>: View {
         // track, a downward one closes the player, decided after 10 pt.
         .simultaneousGesture(
             DragGesture(minimumDistance: 10)
+                .updating($touching) { _, state, _ in state = true }
                 .onChanged { value in
                     if dragAxis == nil {
                         dragAxis = abs(value.translation.width) > abs(value.translation.height) ? .horizontal : .vertical
@@ -520,6 +544,10 @@ private struct CoverView<MenuContent: View>: View {
                     else if projected > side * 0.35 { player.previous() }
                 }
         )
+        .onDragCancelled(touching, stillBusy: { dragAxis != nil }) {
+            dragAxis = nil
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragOffset = 0 }
+        }
         .contextMenu { coverMenu() }
         .accessibilityElement()
         .accessibilityLabel("Album artwork")
@@ -535,12 +563,35 @@ private struct LyricsPanel: View {
     let loading: Bool
     @ObservedObject var clock: PlaybackClock
     let onSeek: (Double) -> Void
+    @State private var currentIndex: Int?
 
-    private var currentIndex: Int? {
-        lyrics.lastIndex { ($0.time ?? .infinity) <= clock.elapsed + 0.25 }
+    private struct SyncKey: Equatable {
+        let lyrics: [LyricLine]
+        let running: Bool
+        let jumps: Int
+    }
+
+    private func index(at time: Double) -> Int? {
+        lyrics.lastIndex { ($0.time ?? .infinity) <= time + 0.25 }
     }
 
     var body: some View {
+        content
+            // Looks ten times a second for the line being sung, but only
+            // redraws when it moves on (it used to redraw 20 times a second).
+            .task(id: SyncKey(lyrics: lyrics, running: clock.running, jumps: clock.jumps)) {
+                currentIndex = index(at: clock.elapsed(at: Date()))
+                guard clock.running else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    let now = index(at: clock.elapsed(at: Date()))
+                    if now != currentIndex { currentIndex = now }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if lyrics.isEmpty {
             VStack(spacing: 10) {
                 if loading { ProgressView() } else {
@@ -597,7 +648,8 @@ private struct TimeBar: View {
                     onCommit: {
                         if let scrub { onSeek(scrub) }
                         scrub = nil
-                    }
+                    },
+                    onCancel: { scrub = nil }
                 )
                 HStack {
                     Text(Self.format(position))
@@ -632,7 +684,10 @@ struct Scrubber: View {
     let enabled: Bool
     let onChange: (Double) -> Void
     let onCommit: () -> Void
+    /// Called when iOS cancels the drag instead of ending it.
+    var onCancel: () -> Void = {}
     @State private var dragging = false
+    @GestureState private var touching = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -646,10 +701,11 @@ struct Scrubber: View {
             .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, state, _ in state = true }
                     .onChanged { value in
                         guard enabled else { return }
                         dragging = true
-                        onChange(min(max(value.location.x / proxy.size.width, 0), 1))
+                        onChange(min(max(value.location.x / max(proxy.size.width, 1), 0), 1))
                     }
                     .onEnded { _ in
                         guard enabled else { return }
@@ -659,7 +715,12 @@ struct Scrubber: View {
             )
             .animation(.easeOut(duration: 0.15), value: dragging)
         }
-        .frame(height: 24)
+        // Tall enough to grab without aiming.
+        .frame(height: 32)
+        .onDragCancelled(touching, stillBusy: { dragging }) {
+            dragging = false
+            onCancel()
+        }
         .sensoryFeedback(.selection, trigger: dragging)
         .accessibilityElement()
         .accessibilityLabel("Playback position")
@@ -697,6 +758,22 @@ enum Fluid {
     }
 }
 
+extension View {
+    /// Runs `reset` when a drag stops without its usual ending: iOS cancels
+    /// drags for calls, alerts and other gestures, and a bar or page that
+    /// only tidied up in `onEnded` was left stuck half-way.
+    /// `active` is a `@GestureState` that is true while the finger is down.
+    func onDragCancelled(_ active: Bool, stillBusy: @escaping () -> Bool, reset: @escaping () -> Void) -> some View {
+        onChange(of: active) { _, isDown in
+            guard !isDown else { return }
+            // One turn later, so a normal ending has had its say first.
+            Task { @MainActor in
+                if stillBusy() { reset() }
+            }
+        }
+    }
+}
+
 /// Shared between the page (which moves) and the area you grab.
 @MainActor
 final class SwipeDownState: ObservableObject {
@@ -731,10 +808,13 @@ struct SwipeDownArea: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var axis: Axis?
     @State private var ignored = false
+    @State private var settling = false
+    @GestureState private var touching = false
 
     func body(content: Content) -> some View {
         content.simultaneousGesture(
             DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                .updating($touching) { _, state, _ in state = true }
                 .onChanged { value in
                     if axis == nil {
                         ignored = blocked?.contains(value.startLocation) ?? false
@@ -754,6 +834,7 @@ struct SwipeDownArea: ViewModifier {
                     let projected = swipe.offset + Fluid.project(velocity)
                     let height = swipe.height
                     let start = swipe.offset
+                    settling = true
                     if start > 0, velocity > -50, projected > height * 0.3 {
                         if reduceMotion {
                             swipe.offset = 0
@@ -774,6 +855,14 @@ struct SwipeDownArea: ViewModifier {
                     }
                 }
         )
+        .onDragCancelled(touching, stillBusy: { !settling && (axis != nil || swipe.offset != 0) }) {
+            axis = nil
+            ignored = false
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) { swipe.offset = 0 }
+        }
+        .onChange(of: touching) { _, isDown in
+            if isDown { settling = false }
+        }
     }
 }
 
@@ -786,6 +875,7 @@ private struct VolumeBar: View {
     @State private var grabbedAt: Float?
     @State private var stretch: CGFloat = 0
     @State private var width: CGFloat = 1
+    @GestureState private var touching = false
 
     private var held: Bool { grabbedAt != nil }
 
@@ -808,6 +898,7 @@ private struct VolumeBar: View {
             .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, state, _ in state = true }
                     .onChanged { value in
                         if grabbedAt == nil { grabbedAt = volume.level }
                         let raw = (grabbedAt ?? 0) + Float(value.translation.width / max(width, 1))
@@ -821,6 +912,10 @@ private struct VolumeBar: View {
                     }
             )
             .animation(.spring(response: 0.25, dampingFraction: 1), value: held)
+            .onDragCancelled(touching, stillBusy: { grabbedAt != nil }) {
+                grabbedAt = nil
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { stretch = 0 }
+            }
             Image(systemName: "speaker.wave.3.fill")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(held ? 0.9 : 0.5))
@@ -980,9 +1075,15 @@ struct ArtworkThumbnail: View {
     let track: Track
     var size: CGFloat = 48
     var cornerRadius: CGFloat?
-    @State private var image: UIImage?
+    /// The cover, with the song it belongs to: a row reused for another
+    /// song must never show the old one.
+    @State private var loaded: (url: URL, image: UIImage)?
 
     var body: some View {
+        // Shrunk to the size shown, and taken straight from memory when it
+        // is there, so scrolling back never flashes the placeholder.
+        let bucket = ArtworkResolver.Size.fitting(size)
+        let image = loaded?.url == track.url ? loaded?.image : ArtworkResolver.cached(track, size: bucket)
         Group {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
@@ -996,7 +1097,9 @@ struct ArtworkThumbnail: View {
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius ?? size * 0.12, style: .continuous))
         .task(id: track.id) {
-            image = await ArtworkResolver.shared.image(for: track, meta: library.meta(for: track))
+            if let image = await ArtworkResolver.shared.image(for: track, meta: library.meta(for: track), size: bucket) {
+                loaded = (track.url, image)
+            }
         }
     }
 }
