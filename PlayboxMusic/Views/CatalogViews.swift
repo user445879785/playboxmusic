@@ -178,18 +178,19 @@ struct AlbumCarousel: View {
 /// An album cover in a carousel. Checked on Soulseek as it scrolls into
 /// view and left out when no one shares it.
 private struct AlbumTile: View {
-    @EnvironmentObject private var client: SoulseekClient
+    @Environment(\.soulseek) private var client
+    @EnvironmentObject private var checks: CatalogChecks
     let album: ITunesItem
 
     private var key: String { "album-\(album.id)" }
 
     var body: some View {
-        if client.availability[key] != .unavailable {
+        if checks.states[key] != .unavailable {
             NavigationLink(value: album) {
                 VStack(alignment: .leading, spacing: 4) {
                     CatalogArtwork(url: album.artworkURL(size: 400), size: 140)
                         .overlay(alignment: .bottomTrailing) {
-                            AvailabilityBadge(state: client.availability[key]).padding(6)
+                            AvailabilityBadge(state: checks.states[key]).padding(6)
                         }
                     Text(album.collectionName ?? "")
                         .font(.footnote.weight(.semibold)).lineLimit(1)
@@ -200,9 +201,9 @@ private struct AlbumTile: View {
             }
             .buttonStyle(.plain)
             .transition(.scale(scale: 0.85).combined(with: .opacity))
-            .task(id: client.isConnected) {
-                await client.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
-                                        trackCount: album.trackCount)
+            .task(id: checks.connected) {
+                await client?.checkAlbum(key: key, artist: album.artistName, album: album.collectionName ?? "",
+                                         trackCount: album.trackCount)
             }
         }
     }
@@ -235,7 +236,8 @@ struct AvailabilityBadge: View {
 /// Checked on Soulseek as it appears, and left out when no one shares it.
 struct SongRow: View {
     @EnvironmentObject private var library: MusicLibrary
-    @EnvironmentObject private var client: SoulseekClient
+    @Environment(\.soulseek) private var client
+    @EnvironmentObject private var checks: CatalogChecks
     @ObservedObject private var preview = PreviewPlayer.shared
     let song: ITunesItem
     var leading: String?
@@ -243,18 +245,23 @@ struct SongRow: View {
     /// Off while an album page is still checking the whole album, which
     /// answers for its songs without one search each.
     var probe = true
+    /// Search and charts leave out songs no one shares. An album page keeps
+    /// every row (dimmed) so the list doesn't shift while you scroll.
+    var hidesUnavailable = true
 
     private var key: String { "song-\(song.id)" }
+    private var unavailable: Bool { checks.states[key] == .unavailable && downloadedCopy == nil }
 
     var body: some View {
-        if client.availability[key] == .unavailable && downloadedCopy == nil {
+        if unavailable && hidesUnavailable {
             EmptyView()
         } else {
             row
-                .task(id: probe && client.isConnected) {
+                .opacity(unavailable ? 0.4 : 1)
+                .task(id: probe && checks.connected) {
                     guard probe, downloadedCopy == nil else { return }
-                    await client.checkSong(key: key, artist: song.artistName, title: song.trackName ?? "",
-                                           durationSeconds: song.durationSeconds)
+                    await client?.checkSong(key: key, artist: song.artistName, title: song.trackName ?? "",
+                                            durationSeconds: song.durationSeconds)
                 }
         }
     }
@@ -288,8 +295,10 @@ struct SongRow: View {
                     if let copy = downloadedCopy {
                         if library.isFavourite(copy) { StarMark() }
                         DownloadedMark()
-                    } else if case .checking = client.availability[key] {
+                    } else if case .checking = checks.states[key] {
                         ProgressView().controlSize(.mini)
+                    } else if unavailable {
+                        Text("Not shared").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
                 Text([song.artistName, showsArtwork ? song.collectionName : song.durationText]
@@ -297,7 +306,7 @@ struct SongRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
-            GetSongButton(song: song)
+            if !unavailable { GetSongButton(song: song) }
         }
         .contentShape(Rectangle())
         .onTapGesture { PreviewPlayer.shared.toggle(song) }
@@ -328,7 +337,8 @@ struct AlbumDetailView: View {
             Section("Songs") {
                 if loading { ProgressView().frame(maxWidth: .infinity) }
                 ForEach(tracks) { track in
-                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false, probe: albumChecked)
+                    SongRow(song: track, leading: "\(track.trackNumber ?? 0)", showsArtwork: false, probe: albumChecked,
+                            hidesUnavailable: false)
                 }
             }
 

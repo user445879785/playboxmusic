@@ -53,7 +53,7 @@ struct GlassDock: View {
 
     private func select(_ id: String) {
         guard id != selection else { return }
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.45, dampingFraction: 0.72)) {
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.28, dampingFraction: 0.78)) {
             selection = id
         }
     }
@@ -119,7 +119,9 @@ struct GlassDock: View {
     /// 75 % the clear glass style takes over, as in SOMA.
     @ViewBuilder
     private var capsule: some View {
-        let solid = reduceTransparency ? 1 : max(0, 0.5 - transparency) / 0.5
+        // Every step of the slider changes the look: a dark wash from fully
+        // solid (0) to none (75 %+), where the clearer glass takes over.
+        let solid = reduceTransparency ? 1 : min(1, max(0, 0.75 - transparency) / 0.75)
         ZStack {
             #if compiler(>=6.2)
             if #available(iOS 26.0, *), !reduceTransparency {
@@ -132,7 +134,7 @@ struct GlassDock: View {
             #else
             Capsule().fill(.ultraThinMaterial)
             #endif
-            Capsule().fill(Color(uiColor: .systemBackground).opacity(solid * 0.9))
+            Capsule().fill(Color.black.opacity(solid * 0.92))
         }
     }
 }

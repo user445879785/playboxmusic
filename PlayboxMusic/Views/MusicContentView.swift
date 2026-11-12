@@ -8,7 +8,9 @@ struct MusicContentView: View {
     @AppStorage("playbox.music.username") private var username = ""
     @StateObject private var updater = UpdateChecker()
 
-    @ObservedObject private var look = Appearance.shared
+    @AppStorage(Appearance.accentKey) private var accentHex = Appearance.defaultAccent
+    @AppStorage(Appearance.transparencyKey) private var dockTransparency = 0.5
+    @AppStorage(Appearance.scaleKey) private var dockScale = 1.0
     @State private var tab = "search"
 
     private var tabs: [ChromeTab] {
@@ -22,7 +24,7 @@ struct MusicContentView: View {
     }
 
     var body: some View {
-        let dockHeight = GlassDock.baseHeight * look.dockScale
+        let dockHeight = GlassDock.baseHeight * dockScale
         let safeBottom = Self.deviceBottomInset
         let bottom = max(safeBottom - 8, 10)
         // Apple's TabView switches the pages and keeps each one's place;
@@ -41,8 +43,8 @@ struct MusicContentView: View {
                 .dockClearance(clearance).tag("settings")
         }
         .overlay(alignment: .bottom) {
-            GlassDock(tabs: tabs, selection: $tab, accent: look.accent,
-                      transparency: look.dockTransparency, scale: look.dockScale)
+            GlassDock(tabs: tabs, selection: $tab, accent: Color(uiColor: UIColor(somaHex: accentHex)),
+                      transparency: dockTransparency, scale: dockScale)
                 .frame(height: dockHeight)
                 .padding(.horizontal, 14)
                 .padding(.bottom, bottom)
@@ -51,7 +53,7 @@ struct MusicContentView: View {
                 .ignoresSafeArea(edges: .bottom)
         }
         // A new accent repaints every screen.
-        .id(look.accentHex)
+        .id(accentHex)
         .preferredColorScheme(.dark)
         .tint(.brand)
         .environmentObject(updater)
@@ -67,6 +69,7 @@ struct MusicContentView: View {
         .task {
             player.metaProvider = { [library] track in library.meta(for: track) }
             player.similarProvider = { [library] track, played in library.similar(to: track, excluding: played) }
+            player.skipProvider = { [library] track in library.isSkipped(track) }
             client.onDownloadFinished = { url, play, meta in
                 if let meta { library.setMeta(meta, for: url) }
                 library.reload()
@@ -161,7 +164,7 @@ private struct MiniPlayerInset: ViewModifier {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             } label: {
                 Image(systemName: liked ? "star.fill" : "star")
-                    .foregroundStyle(liked ? Color.yellow : .white.opacity(0.85))
+                    .foregroundStyle(liked ? Color.brand : .white.opacity(0.85))
                     .frame(width: 38, height: 44)
                     .contentTransition(.symbolEffect(.replace))
             }

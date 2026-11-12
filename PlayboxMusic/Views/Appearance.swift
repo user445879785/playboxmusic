@@ -3,34 +3,23 @@ import UIKit
 
 /// App-wide look: the accent colour and the glass dock's transparency and
 /// size, saved between launches. Same controls as SOMA's Setup › Dock.
-final class Appearance: ObservableObject {
+final class Appearance {
     static let shared = Appearance()
 
     static let swatches: [(name: String, hex: String)] = [
         ("Playbox", "#1FD661"), ("SOMA Lime", "#D3FD50"), ("Sky", "#4FB3FF"), ("Violet", "#A78BFA"),
-        ("Pink", "#FF5FA2"), ("Coral", "#FF6B5A"), ("Amber", "#FFB020"), ("Mint", "#4BE3C1"),
-        ("Red", "#FF453A"), ("White", "#F2F2F7")
+        ("Pink", "#FF5FA2"), ("Apple Music", "#FA2D48"), ("Amber", "#FFB020"), ("Mint", "#4BE3C1"),
+        ("Coral", "#FF6B5A"), ("White", "#F2F2F7")
     ]
 
-    @Published var accentHex: String { didSet { UserDefaults.standard.set(accentHex, forKey: "appearance.accent") } }
-    /// 0 = solid, 0.5 = standard glass, 1 = clearest glass.
-    @Published var dockTransparency: Double { didSet { UserDefaults.standard.set(dockTransparency, forKey: "appearance.dockTransparency") } }
-    /// 0.8 … 1.25.
-    @Published var dockScale: Double { didSet { UserDefaults.standard.set(dockScale, forKey: "appearance.dockScale") } }
+    static let accentKey = "appearance.accent"
+    static let transparencyKey = "appearance.dockTransparency"
+    static let scaleKey = "appearance.dockScale"
+    static let defaultAccent = "#1FD661"
 
-    private init() {
-        let defaults = UserDefaults.standard
-        accentHex = defaults.string(forKey: "appearance.accent") ?? "#1FD661"
-        dockTransparency = defaults.object(forKey: "appearance.dockTransparency") as? Double ?? 0.5
-        dockScale = defaults.object(forKey: "appearance.dockScale") as? Double ?? 1
-    }
-
+    /// Read live from settings every time, so nothing can hold a stale colour.
+    var accentHex: String { UserDefaults.standard.string(forKey: Self.accentKey) ?? Self.defaultAccent }
     var accentUIColor: UIColor { UIColor(somaHex: accentHex) }
-
-    var accent: Color {
-        get { Color(uiColor: accentUIColor) }
-        set { accentHex = UIColor(newValue).hexString }
-    }
 }
 
 extension UIColor {
@@ -56,27 +45,35 @@ extension UIColor {
 }
 
 /// Settings › Appearance: accent swatches plus a custom picker, and the
-/// dock's transparency and size with a live preview.
+/// dock's transparency and size. Stored with @AppStorage, which the dock
+/// and every screen read directly, so changes apply immediately.
 struct AppearanceSection: View {
-    @ObservedObject private var look = Appearance.shared
+    @AppStorage(Appearance.accentKey) private var accentHex = Appearance.defaultAccent
+    @AppStorage(Appearance.transparencyKey) private var dockTransparency = 0.5
+    @AppStorage(Appearance.scaleKey) private var dockScale = 1.0
+
+    private var accent: Binding<Color> {
+        Binding(get: { Color(uiColor: UIColor(somaHex: accentHex)) },
+                set: { accentHex = UIColor($0).hexString })
+    }
 
     var body: some View {
         Section {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     ForEach(Appearance.swatches, id: \.hex) { swatch in
-                        let selected = look.accentHex.caseInsensitiveCompare(swatch.hex) == .orderedSame
+                        let selected = accentHex.caseInsensitiveCompare(swatch.hex) == .orderedSame
+                        let colour = Color(uiColor: UIColor(somaHex: swatch.hex))
                         Button {
-                            withAnimation(.snappy) { look.accentHex = swatch.hex }
+                            accentHex = swatch.hex
                         } label: {
                             Circle()
-                                .fill(Color(uiColor: UIColor(somaHex: swatch.hex)))
+                                .fill(colour)
                                 .frame(width: 34, height: 34)
                                 .overlay(Circle().stroke(.white, lineWidth: selected ? 3 : 0).padding(-4))
-                                .shadow(color: Color(uiColor: UIColor(somaHex: swatch.hex)).opacity(0.45), radius: 8, y: 3)
-                                .scaleEffect(selected ? 1.05 : 1)
+                                .shadow(color: colour.opacity(0.45), radius: 8, y: 3)
                         }
-                        .buttonStyle(PressScaleStyle())
+                        .buttonStyle(.borderless)
                         .accessibilityLabel(swatch.name)
                         .accessibilityAddTraits(selected ? .isSelected : [])
                     }
@@ -84,19 +81,19 @@ struct AppearanceSection: View {
                 .padding(.vertical, 8)
                 .padding(.horizontal, 6)
             }
-            .sensoryFeedback(.selection, trigger: look.accentHex)
-            ColorPicker("Custom colour", selection: $look.accent, supportsOpacity: false)
+            .sensoryFeedback(.selection, trigger: accentHex)
+            ColorPicker("Custom colour", selection: accent, supportsOpacity: false)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Dock transparency")
                     Spacer()
-                    Text(look.dockTransparency == 0.5 ? "Standard" : "\(Int((look.dockTransparency * 100).rounded()))%")
+                    Text(abs(dockTransparency - 0.5) < 0.01 ? "Standard" : "\(Int((dockTransparency * 100).rounded()))%")
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
                 HStack {
                     Text("Solid").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: $look.dockTransparency, in: 0...1, step: 0.05)
+                    Slider(value: $dockTransparency, in: 0...1, step: 0.05)
                     Text("Clear").font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -104,25 +101,23 @@ struct AppearanceSection: View {
                 HStack {
                     Text("Dock size")
                     Spacer()
-                    Text("\(Int((look.dockScale * 100).rounded()))%").foregroundStyle(.secondary).monospacedDigit()
+                    Text("\(Int((dockScale * 100).rounded()))%").foregroundStyle(.secondary).monospacedDigit()
                 }
                 HStack {
                     Text("S").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: $look.dockScale, in: 0.8...1.25, step: 0.05)
+                    Slider(value: $dockScale, in: 0.8...1.25, step: 0.05)
                     Text("L").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Button("Reset Appearance") {
-                withAnimation(.snappy) {
-                    look.accentHex = "#1FD661"
-                    look.dockTransparency = 0.5
-                    look.dockScale = 1
-                }
+                accentHex = Appearance.defaultAccent
+                dockTransparency = 0.5
+                dockScale = 1
             }
         } header: {
             Text("Appearance")
         } footer: {
-            Text("The dock is real Liquid Glass on iOS 26 and later; earlier versions use the system blur.")
+            Text("The dock is real Liquid Glass on iOS 26 and later.")
         }
     }
 }

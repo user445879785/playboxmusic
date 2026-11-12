@@ -17,6 +17,7 @@ struct NowPlayingView: View {
     var onSwipeClose: (() -> Void)?
     @State private var sheet: Sheet?
     @State private var lyricsFrame: CGRect?
+    @StateObject private var swipe = SwipeDownState()
     @State private var showLyrics = false
     @State private var lyrics: [LyricLine] = []
     @State private var lyricsLoading = false
@@ -41,6 +42,9 @@ struct NowPlayingView: View {
         GeometryReader { proxy in
             let side = min(proxy.size.width - 48, proxy.size.height * 0.42)
             VStack(spacing: 0) {
+              // Swipe down here (top bar, artwork, title) to close. The bars
+              // and buttons below have no competing gesture.
+              VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 20)
                 ZStack {
@@ -62,6 +66,11 @@ struct NowPlayingView: View {
                 .animation(.spring(response: 0.5, dampingFraction: 0.86), value: player.current)
                 Spacer(minLength: 20)
                 titleRow
+              }
+              .contentShape(Rectangle())
+              .modifier(SwipeDownArea(swipe: swipe, blocked: showLyrics ? lyricsFrame : nil) {
+                  if let onSwipeClose { onSwipeClose() } else { dismiss() }
+              })
                 TimeBar(clock: player.clock) { player.seek(to: $0) }
                     .padding(.top, 12)
                 transport
@@ -79,9 +88,7 @@ struct NowPlayingView: View {
         }
         .background { backdrop }
         .foregroundStyle(.white)
-        .modifier(InteractiveDismiss(blocked: showLyrics ? lyricsFrame : nil) {
-            if let onSwipeClose { onSwipeClose() } else { dismiss() }
-        })
+        .modifier(SwipeDownPage(swipe: swipe))
         .preferredColorScheme(.dark)
         .presentationBackground(.clear)
         .overlay(alignment: .top) { noticeBanner }
@@ -165,6 +172,20 @@ struct NowPlayingView: View {
         Button { toggleFavourite() } label: {
             Label(isFavourite ? "Unstar" : "Star", systemImage: isFavourite ? "star.slash" : "star")
         }
+        if let track = player.current {
+            Divider()
+            // Spotify's 30-day Snooze: a break from a song, not goodbye.
+            Button {
+                library.snooze(track)
+                player.notice = "Snoozed for 30 days"
+                player.skipForGood()
+            } label: { Label("Snooze for 30 Days", systemImage: "moon.zzz") }
+            Button(role: .destructive) {
+                library.setHidden(track, true)
+                player.notice = "Hidden. Find it in Library to bring it back."
+                player.skipForGood()
+            } label: { Label("Hide Song", systemImage: "eye.slash") }
+        }
     }
 
     private var titleRow: some View {
@@ -193,7 +214,7 @@ struct NowPlayingView: View {
             Button { toggleFavourite() } label: {
                 Image(systemName: isFavourite ? "star.fill" : "star")
                     .font(.title2)
-                    .foregroundStyle(isFavourite ? Color.yellow : .white.opacity(0.8))
+                    .foregroundStyle(isFavourite ? Color.brand : .white.opacity(0.8))
                     .frame(width: 44, height: 44)
                     .symbolEffect(.bounce, value: isFavourite)
                     .contentTransition(.symbolEffect(.replace))
@@ -450,7 +471,8 @@ private struct CoverView<MenuContent: View>: View {
 
             Image(systemName: "star.fill")
                 .font(.system(size: 90))
-                .foregroundStyle(.yellow)
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.3), radius: 12)
                 .shadow(radius: 10)
                 .scaleEffect(heartBurst ? 1 : 0.4)
                 .opacity(heartBurst ? 0.95 : 0)
@@ -619,7 +641,7 @@ struct Scrubber: View {
             .frame(height: dragging ? 9 : 4)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard enabled else { return }
@@ -672,71 +694,83 @@ enum Fluid {
     }
 }
 
-/// Swipe the whole player down to close it, from anywhere on the page.
-/// The page follows the finger 1:1, rubber-bands when pulled up, and on
-/// release continues at the finger's speed: away if the flick is heading
-/// far enough down, back into place otherwise.
-struct InteractiveDismiss: ViewModifier {
+/// Shared between the page (which moves) and the area you grab.
+@MainActor
+final class SwipeDownState: ObservableObject {
+    @Published var offset: CGFloat = 0
+    var height: CGFloat = 800
+}
+
+/// Moves the whole player with the swipe and dims what's behind it.
+struct SwipeDownPage: ViewModifier {
+    @ObservedObject var swipe: SwipeDownState
+
+    func body(content: Content) -> some View {
+        let progress = max(0, min(1, swipe.offset / max(1, swipe.height)))
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { swipe.height = $0 }
+            .offset(y: swipe.offset)
+            .shadow(color: .black.opacity(swipe.offset > 1 ? 0.45 : 0), radius: 24, y: -4)
+            .background {
+                Color.black.opacity(swipe.offset > 1 ? 0.5 * (1 - progress) : 0).ignoresSafeArea()
+            }
+    }
+}
+
+/// Swipe down to close: follows the finger 1:1, rubber-bands when pulled
+/// up, and on release continues at the finger's speed, away if the flick is
+/// heading far enough down, back into place otherwise.
+struct SwipeDownArea: ViewModifier {
+    @ObservedObject var swipe: SwipeDownState
     /// A region that scrolls on its own (lyrics), where the swipe is ignored.
     let blocked: CGRect?
     let onDismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var offset: CGFloat = 0
-    @State private var height: CGFloat = 800
     @State private var axis: Axis?
     @State private var ignored = false
 
     func body(content: Content) -> some View {
-        let progress = max(0, min(1, offset / max(1, height)))
-        content
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-            .offset(y: offset)
-            .shadow(color: .black.opacity(offset > 1 ? 0.45 : 0), radius: 24, y: -4)
-            .background {
-                // Dims what's behind, lifting as the page slides away.
-                Color.black.opacity(offset > 1 ? 0.5 * (1 - progress) : 0).ignoresSafeArea()
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 10, coordinateSpace: .global)
-                    .onChanged { value in
-                        if axis == nil {
-                            ignored = blocked?.contains(value.startLocation) ?? false
-                            axis = abs(value.translation.height) > abs(value.translation.width) ? .vertical : .horizontal
-                        }
-                        guard axis == .vertical, !ignored else { return }
-                        let dy = value.translation.height
-                        offset = dy >= 0 ? dy : Fluid.rubberband(dy, dimension: height)
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                .onChanged { value in
+                    if axis == nil {
+                        ignored = blocked?.contains(value.startLocation) ?? false
+                        axis = abs(value.translation.height) > abs(value.translation.width) ? .vertical : .horizontal
                     }
-                    .onEnded { value in
-                        defer {
-                            axis = nil
-                            ignored = false
+                    guard axis == .vertical, !ignored else { return }
+                    let dy = value.translation.height
+                    swipe.offset = dy >= 0 ? dy : Fluid.rubberband(dy, dimension: swipe.height)
+                }
+                .onEnded { value in
+                    defer {
+                        axis = nil
+                        ignored = false
+                    }
+                    guard axis == .vertical, !ignored else { return }
+                    let velocity = value.velocity.height
+                    let projected = swipe.offset + Fluid.project(velocity)
+                    let height = swipe.height
+                    let start = swipe.offset
+                    if start > 0, velocity > -50, projected > height * 0.3 {
+                        if reduceMotion {
+                            swipe.offset = 0
+                            onDismiss()
+                            return
                         }
-                        guard axis == .vertical, !ignored else { return }
-                        let velocity = value.velocity.height
-                        let projected = offset + Fluid.project(velocity)
-                        if offset > 0, velocity > -50, projected > height * 0.3 {
-                            if reduceMotion {
-                                offset = 0
-                                onDismiss()
-                                return
-                            }
-                            let start = offset
-                            withAnimation(.interpolatingSpring(duration: 0.3, bounce: 0,
-                                                               initialVelocity: Fluid.relative(velocity, from: start, to: height))) {
-                                offset = height
-                            } completion: {
-                                onDismiss()
-                            }
-                        } else {
-                            let start = offset
-                            withAnimation(.interpolatingSpring(duration: 0.4, bounce: abs(velocity) > 300 ? 0.2 : 0,
-                                                               initialVelocity: Fluid.relative(velocity, from: start, to: 0))) {
-                                offset = 0
-                            }
+                        withAnimation(.interpolatingSpring(duration: 0.25, bounce: 0,
+                                                           initialVelocity: Fluid.relative(velocity, from: start, to: height))) {
+                            swipe.offset = height
+                        } completion: {
+                            onDismiss()
+                        }
+                    } else {
+                        withAnimation(.interpolatingSpring(duration: 0.35, bounce: abs(velocity) > 300 ? 0.2 : 0,
+                                                           initialVelocity: Fluid.relative(velocity, from: start, to: 0))) {
+                            swipe.offset = 0
                         }
                     }
-            )
+                }
+        )
     }
 }
 
@@ -769,7 +803,7 @@ private struct VolumeBar: View {
             .frame(height: 34)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         if grabbedAt == nil { grabbedAt = volume.level }
@@ -791,7 +825,7 @@ private struct VolumeBar: View {
                 .frame(width: 22)
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: stretch != 0)
-        .background { HiddenVolumeView(volume: volume).frame(width: 1, height: 1).opacity(0.01) }
+        .background { HiddenVolumeView(volume: volume).frame(width: 120, height: 30).allowsHitTesting(false) }
         .sensoryFeedback(.impact(weight: .light), trigger: volume.level <= 0 || volume.level >= 1) { _, edge in edge }
         .accessibilityElement()
         .accessibilityLabel("Volume")
@@ -806,8 +840,19 @@ private struct VolumeBar: View {
 /// only way iOS lets apps change it (this also hides the volume HUD).
 private final class SystemVolume: ObservableObject {
     @Published private(set) var level: Float = AVAudioSession.sharedInstance().outputVolume
-    weak var slider: UISlider?
+    /// The hidden system volume view; its slider is looked up when needed,
+    /// because iOS builds it only after the view is on screen.
+    weak var volumeView: MPVolumeView?
     private var observation: NSKeyValueObservation?
+
+    private var slider: UISlider? {
+        func find(_ view: UIView) -> UISlider? {
+            if let slider = view as? UISlider { return slider }
+            for sub in view.subviews { if let found = find(sub) { return found } }
+            return nil
+        }
+        return volumeView.flatMap(find)
+    }
 
     init() {
         observation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] session, _ in
@@ -819,8 +864,10 @@ private final class SystemVolume: ObservableObject {
     func set(_ value: Float) {
         let clamped = min(1, max(0, value))
         level = clamped
-        slider?.setValue(clamped, animated: false)
-        slider?.sendActions(for: .valueChanged)
+        guard let slider else { return }
+        slider.setValue(clamped, animated: false)
+        slider.sendActions(for: .valueChanged)
+        slider.sendActions(for: .touchUpInside)
     }
 }
 
@@ -830,14 +877,14 @@ private struct HiddenVolumeView: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView {
         let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 120, height: 30))
         view.isUserInteractionEnabled = false
+        // Nearly invisible, but still on screen: iOS ignores a fully hidden one.
+        view.alpha = 0.011
+        volume.volumeView = view
         return view
     }
 
     func updateUIView(_ uiView: MPVolumeView, context: Context) {
-        guard volume.slider == nil else { return }
-        DispatchQueue.main.async {
-            volume.slider = uiView.subviews.compactMap { $0 as? UISlider }.first
-        }
+        volume.volumeView = uiView
     }
 }
 

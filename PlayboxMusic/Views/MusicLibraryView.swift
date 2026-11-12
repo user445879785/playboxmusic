@@ -52,6 +52,15 @@ struct MusicLibraryView: View {
                                 Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
                                     .foregroundStyle(player.current?.id == track.id ? Color.brand : .primary)
                                 if library.isFavourite(track) { StarMark() }
+                                if let days = library.snoozeDaysLeft(track) {
+                                    Label("\(days)d", systemImage: "moon.zzz.fill")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityLabel("Snoozed for \(days) more days")
+                                } else if library.isHidden(track) {
+                                    Image(systemName: "eye.slash").font(.caption2).foregroundStyle(.secondary)
+                                        .accessibilityLabel("Hidden")
+                                }
                             }
                             Text("\(library.subtitle(of: track)) · \(track.fileExtension)")
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -74,10 +83,21 @@ struct MusicLibraryView: View {
                     } label: {
                         Label(library.isFavourite(track) ? "Unstar" : "Star", systemImage: library.isFavourite(track) ? "star.slash" : "star")
                     }
-                    .tint(.yellow)
+                    .tint(.brand)
                     Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
                         .tint(.indigo)
+                    if library.isSnoozed(track) || library.isHidden(track) {
+                        Button {
+                            library.unsnooze(track)
+                            library.setHidden(track, false)
+                        } label: { Label("Bring Back", systemImage: "arrow.uturn.backward") }
+                            .tint(.green)
+                    } else {
+                        Button { library.snooze(track) } label: { Label("Snooze 30 Days", systemImage: "moon.zzz") }
+                            .tint(.purple)
+                    }
                 }
+                .opacity(library.isSkipped(track) ? 0.5 : 1)
             }
         }
         .overlay {

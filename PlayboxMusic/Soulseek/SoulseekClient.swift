@@ -1,3 +1,4 @@
+import SwiftUI
 import Combine
 import CryptoKit
 import Foundation
@@ -19,7 +20,12 @@ final class SoulseekClient: ObservableObject {
         case failed(String)
     }
 
-    @Published private(set) var connectionState: ConnectionState = .disconnected
+    @Published private(set) var connectionState: ConnectionState = .disconnected {
+        didSet { checks.connected = isConnected }
+    }
+    /// Catalogue availability lives in its own object, so catalogue rows
+    /// redraw only when a check finishes, not on every download update.
+    let checks = CatalogChecks()
     @Published private(set) var results: [SlskSearchResult] = []
     @Published private(set) var isSearching = false
     @Published private(set) var transfers: [SlskTransfer] = []
@@ -45,7 +51,10 @@ final class SoulseekClient: ObservableObject {
         case unavailable
     }
 
-    @Published private(set) var availability: [String: Availability] = [:]
+    var availability: [String: Availability] {
+        get { checks.states }
+        set { checks.states = newValue }
+    }
     /// Ranked sources per quality for each available song (one file each)…
     private var songSources: [String: [SlskQuality: [SlskSearchResult]]] = [:]
     /// …and for each album (one shared folder each).
@@ -276,12 +285,12 @@ final class SoulseekClient: ObservableObject {
         availability[key] = .checking
         await acquireProbe()
         defer { releaseProbe() }
-        let query = MusicText.clean([artist, album].compactMap { $0 }.joined(separator: " "))
+        let query = MusicText.clean([artist, Self.albumCore(album)].compactMap { $0 }.joined(separator: " "))
         let results = await gather(query: query, seconds: 7)
         let folders = Self.rankedFolders(in: results, trackCount: trackCount)
             .filter { files in
                 let path = files[0].filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: " ")
-                return SlskMatch.containsAll(MusicText.clean(album), in: path)
+                return SlskMatch.containsAll(Self.albumCore(album), in: path)
             }
         // A folder's quality is its most common file quality.
         let grouped = Dictionary(grouping: folders) { files -> SlskQuality in
@@ -369,6 +378,17 @@ final class SoulseekClient: ObservableObject {
             ids.forEach { cancelTransfer($0, reason: "Skipped: trying another source.") }
         }
         fetches[key] = .notFound
+    }
+
+    /// An album title without catalogue extras ("- EP", "Deluxe Edition",
+    /// "Remastered") that shared folders usually don't include.
+    static func albumCore(_ title: String) -> String {
+        let extras: Set<String> = ["ep", "single", "deluxe", "edition", "version", "remastered", "remaster",
+                                   "expanded", "explicit", "bonus", "track", "tracks", "exclusive",
+                                   "anniversary", "special", "complete", "the", "album"]
+        let words = MusicText.clean(title).split(separator: " ").map(String.init)
+        let core = words.filter { !extras.contains($0.lowercased()) }
+        return (core.isEmpty ? words : core).joined(separator: " ")
     }
 
     /// Forgets a check so the next one searches again.
@@ -526,7 +546,10 @@ final class SoulseekClient: ObservableObject {
             let path = result.filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: "/")
             return result.username + "\u{1F}" + path
         }
-        let minimum = max(1, Int(Double(trackCount ?? 1) * 0.7))
+        // Half the songs is enough: a deluxe edition in the catalogue often
+        // has more tracks than the standard copy people share.
+        let count = trackCount ?? 1
+        let minimum = count < 2 ? 1 : max(2, min(Int(Double(count) * 0.5), 8))
         let rank: ([SlskSearchResult]) -> Double = { files in
             Double(min(files.count, trackCount ?? files.count)) * 50 + score(files[0])
         }
@@ -1072,9 +1095,10 @@ final class SoulseekClient: ObservableObject {
                 received += UInt64(chunk.count)
                 bytesSinceReport += UInt64(chunk.count)
                 let elapsed = Date().timeIntervalSince(reportedAt)
-                // Report every 50 ms. A 50 ms sample is noisy, so the shown speed
-                // is an exponential moving average (roughly the last second).
-                if elapsed >= 0.05 {
+                // Report 4 times a second: every report redraws the screens
+                // that show downloads. The speed is an exponential moving
+                // average (roughly the last second).
+                if elapsed >= 0.25 {
                     let sample = Double(bytesSinceReport) / elapsed
                     let speed = smoothedSpeed.map { $0 + (sample - $0) * min(1, elapsed / 1.0) } ?? sample
                     smoothedSpeed = speed
@@ -1109,5 +1133,24 @@ final class SoulseekClient: ObservableObject {
         case "": "Soulseek rejected the login."
         default: "Soulseek rejected the login: \(reason)"
         }
+    }
+}
+
+/// What catalogue rows watch: each check's result and whether we're signed in.
+@MainActor
+final class CatalogChecks: ObservableObject {
+    @Published var states: [String: SoulseekClient.Availability] = [:]
+    @Published var connected = false
+}
+
+/// The client without observing it (for rows that only start checks).
+private struct SoulseekKey: EnvironmentKey {
+    static let defaultValue: SoulseekClient? = nil
+}
+
+extension EnvironmentValues {
+    var soulseek: SoulseekClient? {
+        get { self[SoulseekKey.self] }
+        set { self[SoulseekKey.self] = newValue }
     }
 }

@@ -26,6 +26,10 @@ final class MusicLibrary: ObservableObject {
     @Published private(set) var tracks: [Track] = []
     @Published private(set) var metadata: [String: TrackMeta] = [:]
     @Published private(set) var favourites: Set<String> = []
+    /// Snoozed songs (Spotify's 30-day Snooze): key → when the snooze ends.
+    @Published private(set) var snoozed: [String: Double] = [:]
+    /// Hidden songs: never played automatically until un-hidden.
+    @Published private(set) var hidden: Set<String> = []
     let root: URL
 
     private var metadataURL: URL { root.appendingPathComponent(".playbox-metadata.json") }
@@ -39,6 +43,10 @@ final class MusicLibrary: ObservableObject {
             metadata = saved
         }
         favourites = Set(UserDefaults.standard.stringArray(forKey: "music.favourites") ?? [])
+        let now = Date().timeIntervalSince1970
+        snoozed = (UserDefaults.standard.dictionary(forKey: "music.snoozed") as? [String: Double] ?? [:])
+            .filter { $0.value > now }
+        hidden = Set(UserDefaults.standard.stringArray(forKey: "music.hidden") ?? [])
         reload()
     }
 
@@ -52,11 +60,41 @@ final class MusicLibrary: ObservableObject {
         UserDefaults.standard.set(Array(favourites), forKey: "music.favourites")
     }
 
+    // MARK: Snooze and hide
+
+    /// Days left on a song's snooze, or nil if it isn't snoozed.
+    func snoozeDaysLeft(_ track: Track) -> Int? {
+        guard let until = snoozed[key(for: track.url)] else { return nil }
+        let left = until - Date().timeIntervalSince1970
+        return left > 0 ? max(1, Int((left / 86_400).rounded(.up))) : nil
+    }
+
+    func isSnoozed(_ track: Track) -> Bool { snoozeDaysLeft(track) != nil }
+    func isHidden(_ track: Track) -> Bool { hidden.contains(key(for: track.url)) }
+    /// Left out of queues, shuffle, autoplay and mixes (still playable by tapping it).
+    func isSkipped(_ track: Track) -> Bool { isHidden(track) || isSnoozed(track) }
+
+    func snooze(_ track: Track, days: Int = 30) {
+        snoozed[key(for: track.url)] = Date().addingTimeInterval(Double(days) * 86_400).timeIntervalSince1970
+        UserDefaults.standard.set(snoozed, forKey: "music.snoozed")
+    }
+
+    func unsnooze(_ track: Track) {
+        snoozed[key(for: track.url)] = nil
+        UserDefaults.standard.set(snoozed, forKey: "music.snoozed")
+    }
+
+    func setHidden(_ track: Track, _ value: Bool) {
+        let id = key(for: track.url)
+        if value { hidden.insert(id) } else { hidden.remove(id) }
+        UserDefaults.standard.set(Array(hidden), forKey: "music.hidden")
+    }
+
     /// Songs to autoplay after the queue: same artist, then same folder, then
     /// favourites, then anything else not played recently.
     func similar(to track: Track, excluding played: [Track], limit: Int = 10) -> [Track] {
         let exclude = Set(played.suffix(50))
-        let pool = tracks.filter { !exclude.contains($0) }
+        let pool = tracks.filter { !exclude.contains($0) && !isSkipped($0) }
         let artist = meta(for: track)?.artist?.lowercased()
         let sameArtist = pool.filter { artist != nil && meta(for: $0)?.artist?.lowercased() == artist }
         let sameFolder = pool.filter { $0.url.deletingLastPathComponent() == track.url.deletingLastPathComponent() }
