@@ -177,9 +177,10 @@ struct StarMark: View {
     var size: CGFloat = 10
 
     var body: some View {
+        // Like Apple Music: a small solid star in the app's accent colour.
         Image(systemName: "star.fill")
-            .font(.system(size: size, weight: .bold))
-            .foregroundStyle(.yellow)
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(Color.brand)
             .accessibilityLabel("Starred")
     }
 }

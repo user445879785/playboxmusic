@@ -216,6 +216,8 @@ final class MusicPlayer: ObservableObject {
 
     /// Supplies saved catalog details (title, artist, cover) for a track.
     var metaProvider: ((Track) -> TrackMeta?)?
+    /// Snoozed or hidden songs, left out of queues (tapping one still plays it).
+    var skipProvider: ((Track) -> Bool)?
     /// Supplies songs to continue with when the queue runs out.
     var similarProvider: ((Track, [Track]) -> [Track])?
 
@@ -296,8 +298,11 @@ final class MusicPlayer: ObservableObject {
         guard tracks.indices.contains(start) else { return }
         originalOrder = nil
         skipDirection = 1
-        queue = tracks
-        index = start
+        // Keep the song you tapped; leave out the snoozed and hidden ones.
+        let chosen = tracks[start]
+        let kept = tracks.enumerated().filter { $0.offset == start || !(skipProvider?($0.element) ?? false) }
+        queue = kept.map(\.element)
+        index = queue.firstIndex(of: chosen) ?? 0
         if shuffle { shuffleUpcoming() }
         startCurrent(from: 0)
     }
@@ -385,6 +390,17 @@ final class MusicPlayer: ObservableObject {
             }
         }
         refresh()
+    }
+
+    /// Snoozes the playing song for 30 days (or hides it) and moves on.
+    func skipForGood() {
+        guard current != nil else { return }
+        queue.remove(at: index)
+        if index >= queue.count {
+            index = max(0, queue.count - 1)
+            if queue.isEmpty { stop(); return }
+        }
+        startCurrent(from: 0)
     }
 
     func next() {

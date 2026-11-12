@@ -400,7 +400,7 @@ private struct TransitionEditor: View {
                         if !mix.isOn { mixOffBanner }
                         MixTimeline(outgoing: outgoing, incoming: incoming, plan: plan, pair: pair,
                                     onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0) })
-                            .frame(height: 300)
+                            .frame(height: 336)
                             .overlay { previewButton(plan) }
                             .overlay(alignment: .bottom) { barsMenu(plan).offset(y: 18) }
                             .padding(.horizontal, 16)
@@ -708,7 +708,24 @@ private struct MixTimeline: View {
         var lane: Lane
         var window: ClosedRange<Double>
         var origin: Double
+        /// Where the dragged point is now. Drawn straight away and saved
+        /// once on release, so the drag isn't slowed by re-planning the mix.
+        var value: Double?
     }
+
+    /// The plan with the in-progress drag applied.
+    private var shown: TransitionPlan {
+        var p = plan
+        if let drag, let value = drag.value {
+            switch drag.lane {
+            case .outgoing: p.mixStart = value
+            case .incoming: p.entry = value
+            }
+        }
+        return p
+    }
+
+    @State private var seeking: Double?
 
     private enum Lane { case outgoing, incoming }
 
@@ -719,24 +736,78 @@ private struct MixTimeline: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            let size = proxy.size
-            TimelineView(.animation(paused: !player.isPlaying)) { context in
-                Canvas { canvas, _ in
-                    draw(in: &canvas, size: size, playhead: playhead(at: context.date))
+        VStack(spacing: 8) {
+            GeometryReader { proxy in
+                let size = proxy.size
+                TimelineView(.animation(paused: !player.isPlaying)) { context in
+                    Canvas { canvas, _ in
+                        draw(in: &canvas, size: size, playhead: seeking ?? playhead(at: context.date))
+                    }
                 }
+                .contentShape(Rectangle())
+                .gesture(dragGesture(size: size))
             }
-            .contentShape(Rectangle())
-            .gesture(dragGesture(size: size))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            seekBar
         }
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement()
         .accessibilityLabel("Transition waveform, \(plan.bars) bars")
         .accessibilityHint("Drag the top song to move the blend, the bottom song to change where it comes in.")
     }
 
+    /// Drag along this bar to move playback through the transition.
+    private var seekBar: some View {
+        GeometryReader { proxy in
+            TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                let span = window.upperBound - window.lowerBound
+                let head = seeking ?? playhead(at: context.date)
+                let fraction = head.map { min(max(($0 - window.lowerBound) / max(span, 0.001), 0), 1) }
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.15)).frame(height: 6)
+                    if let fraction {
+                        Capsule().fill(.white.opacity(0.8))
+                            .frame(width: proxy.size.width * fraction, height: 6)
+                        Circle().fill(.white)
+                            .frame(width: seeking == nil ? 14 : 20, height: seeking == nil ? 14 : 20)
+                            .offset(x: proxy.size.width * fraction - (seeking == nil ? 7 : 10))
+                    }
+                }
+                .frame(maxHeight: .infinity)
+            }
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard isPlayingPair else { return }
+                        let span = window.upperBound - window.lowerBound
+                        let fraction = min(max(value.location.x / max(proxy.size.width, 1), 0), 1)
+                        seeking = window.lowerBound + fraction * span
+                    }
+                    .onEnded { _ in
+                        if let seeking { seek(toOutgoingTime: seeking) }
+                        seeking = nil
+                    }
+            )
+        }
+        .frame(height: 28)
+        .opacity(isPlayingPair ? 1 : 0.35)
+        .animation(.snappy(duration: 0.15), value: seeking == nil)
+        .accessibilityLabel("Playback position in the transition")
+    }
+
+    private var isPlayingPair: Bool { player.current == pair.from || player.current == pair.to }
+
+    private func seek(toOutgoingTime time: Double) {
+        if player.current == pair.from, outgoing.duration > 0 {
+            player.seek(to: min(max(time / outgoing.duration, 0), 1))
+        } else if player.current == pair.to, incoming.duration > 0 {
+            player.seek(to: min(max(incomingTime(time) / incoming.duration, 0), 1))
+        }
+    }
+
     /// Where playback is, in the outgoing song's time, if this pair is playing.
     private func playhead(at date: Date) -> Double? {
+        let plan = shown
         let elapsed = player.clock.elapsed(at: date)
         if player.current == pair.from { return elapsed }
         if player.current == pair.to, plan.inRate > 0 {
@@ -746,10 +817,12 @@ private struct MixTimeline: View {
     }
 
     private func incomingTime(_ outTime: Double) -> Double {
-        plan.entry + (outTime - plan.mixStart) * Double(plan.inRate)
+        let plan = shown
+        return plan.entry + (outTime - plan.mixStart) * Double(plan.inRate)
     }
 
     private func draw(in canvas: inout GraphicsContext, size: CGSize, playhead: Double?) {
+        let plan = shown
         let span = window.upperBound - window.lowerBound
         guard span > 0 else { return }
         let start = window.lowerBound
@@ -843,22 +916,28 @@ private struct MixTimeline: View {
                     drag = DragState(lane: lane, window: window,
                                      origin: lane == .outgoing ? plan.mixStart : plan.entry)
                 }
-                guard let drag else { return }
-                let span = drag.window.upperBound - drag.window.lowerBound
+                guard let current = drag else { return }
+                let span = current.window.upperBound - current.window.lowerBound
                 let seconds = Double(value.translation.width / size.width) * span
-                switch drag.lane {
+                switch current.lane {
                 case .outgoing:
                     // Moving the outgoing song left starts the blend later in it.
-                    let target = outgoing.snapToBeat(drag.origin - seconds)
-                    let clamped = min(max(0, target), max(0, outgoing.duration - plan.length))
-                    if abs(clamped - plan.mixStart) > 0.001 { onMoveStart(clamped) }
+                    let target = outgoing.snapToBeat(current.origin - seconds)
+                    drag?.value = min(max(0, target), max(0, outgoing.duration - plan.length))
                 case .incoming:
-                    let target = incoming.snapToBeat(drag.origin - seconds * Double(plan.inRate))
-                    let clamped = min(max(0, target), max(0, incoming.duration - plan.length))
-                    if abs(clamped - plan.entry) > 0.001 { onMoveEntry(clamped) }
+                    let target = incoming.snapToBeat(current.origin - seconds * Double(plan.inRate))
+                    drag?.value = min(max(0, target), max(0, incoming.duration - plan.length))
                 }
             }
-            .onEnded { _ in drag = nil }
+            .onEnded { _ in
+                if let current = drag, let value = current.value {
+                    switch current.lane {
+                    case .outgoing: if abs(value - plan.mixStart) > 0.001 { onMoveStart(value) }
+                    case .incoming: if abs(value - plan.entry) > 0.001 { onMoveEntry(value) }
+                    }
+                }
+                drag = nil
+            }
     }
 }
 

@@ -6,6 +6,8 @@ struct MusicLibraryView: View {
     @State private var filter = ""
     @State private var importing = false
     @State private var importedCount: Int?
+    @State private var namingPlaylist = false
+    @State private var newPlaylistTrack: Track?
 
     private var visible: [Track] {
         let needle = filter.trimmingCharacters(in: .whitespaces)
@@ -22,6 +24,9 @@ struct MusicLibraryView: View {
                 LibraryHeader(mix: player.mix, tracks: library.tracks)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     .listRowSeparator(.hidden)
+            }
+            if filter.isEmpty {
+                PlaylistsSection()
             }
             if filter.isEmpty, !library.favouriteTracks.isEmpty {
                 Section("Starred") {
@@ -52,6 +57,15 @@ struct MusicLibraryView: View {
                                 Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
                                     .foregroundStyle(player.current?.id == track.id ? Color.brand : .primary)
                                 if library.isFavourite(track) { StarMark() }
+                                if let days = library.snoozeDaysLeft(track) {
+                                    Label("\(days)d", systemImage: "moon.zzz.fill")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityLabel("Snoozed for \(days) more days")
+                                } else if library.isHidden(track) {
+                                    Image(systemName: "eye.slash").font(.caption2).foregroundStyle(.secondary)
+                                        .accessibilityLabel("Hidden")
+                                }
                             }
                             Text("\(library.subtitle(of: track)) · \(track.fileExtension)")
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -74,9 +88,34 @@ struct MusicLibraryView: View {
                     } label: {
                         Label(library.isFavourite(track) ? "Unstar" : "Star", systemImage: library.isFavourite(track) ? "star.slash" : "star")
                     }
-                    .tint(.yellow)
+                    .tint(.brand)
                     Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
                         .tint(.indigo)
+                    if library.isSnoozed(track) || library.isHidden(track) {
+                        Button {
+                            library.unsnooze(track)
+                            library.setHidden(track, false)
+                        } label: { Label("Bring Back", systemImage: "arrow.uturn.backward") }
+                            .tint(.green)
+                    } else {
+                        Button { library.snooze(track) } label: { Label("Snooze 30 Days", systemImage: "moon.zzz") }
+                            .tint(.purple)
+                    }
+                }
+                .opacity(library.isSkipped(track) ? 0.5 : 1)
+                .contextMenu {
+                    Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
+                    Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
+                    AddToPlaylistMenu(track: track) {
+                        newPlaylistTrack = track
+                        namingPlaylist = true
+                    }
+                    Button {
+                        library.setFavourite(track, !library.isFavourite(track))
+                    } label: {
+                        Label(library.isFavourite(track) ? "Unstar" : "Star",
+                              systemImage: library.isFavourite(track) ? "star.slash" : "star")
+                    }
                 }
             }
         }
@@ -128,6 +167,8 @@ struct MusicLibraryView: View {
         .sensoryFeedback(.success, trigger: importedCount) { _, new in (new ?? 0) > 0 }
         .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: "Filter library")
         .navigationTitle("Library")
+        .navigationDestination(for: Playlist.self) { PlaylistView(id: $0.id) }
+        .modifier(NewPlaylistAlert(isPresented: $namingPlaylist, track: newPlaylistTrack))
         .refreshable { library.reload() }
         .onAppear { library.reload() }
     }

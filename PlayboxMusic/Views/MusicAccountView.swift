@@ -9,6 +9,7 @@ struct MusicAccountView: View {
 
     var body: some View {
         Form {
+            DiagnosticsSection()
             AppearanceSection()
 
             Section {

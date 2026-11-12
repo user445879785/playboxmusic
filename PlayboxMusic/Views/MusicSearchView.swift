@@ -167,6 +167,16 @@ struct MusicSearchView: View {
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Artist, album or track")
         .autocorrectionDisabled()
         .textInputAutocapitalization(.never)
+        // Switching modes searches the same words in the new mode, so you
+        // never see the other mode's old results.
+        .onChange(of: mode) { _, newMode in
+            quality = nil
+            let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if newMode == .soulseek, term.count >= 2, term != submitted {
+                submitted = term
+                Task { await client.search(term) }
+            }
+        }
         .onSubmit(of: .search) {
             if mode == .soulseek {
                 submitted = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,7 +186,7 @@ struct MusicSearchView: View {
             }
         }
         // The catalog is fast, so it searches as you type.
-        .task(id: mode == .catalog ? query : "") {
+        .task(id: mode == .catalog ? "catalog|" + query : "soulseek") {
             guard mode == .catalog else { return }
             let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard term.count >= 2 else {
