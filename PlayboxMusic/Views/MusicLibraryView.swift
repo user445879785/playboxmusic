@@ -10,6 +10,10 @@ struct MusicLibraryView: View {
     @State private var importedCount: Int?
     @State private var namingPlaylist = false
     @State private var newPlaylistTrack: Track?
+    @State private var creatingPlaylist = false
+    /// Which chip is on; nil shows everything.
+    @State private var chip: LibraryFilter?
+    @State private var sortByName = false
 
     private struct FilterKey: Equatable {
         let text: String
@@ -19,51 +23,56 @@ struct MusicLibraryView: View {
     var body: some View {
         // Each list is worked out once per redraw, and only the rows on
         // screen are built: a player change no longer rebuilds 5,000 rows.
+        let searching = !filter.isEmpty
+        let showSongs = searching || chip == .songs
         let visible = hits?.map(\.track) ?? library.tracks
         let lyricLines = Dictionary((hits ?? []).compactMap { hit in hit.lyric.map { (hit.track.url, $0) } },
                                     uniquingKeysWith: { first, _ in first })
-        let starred = filter.isEmpty ? library.favouriteTracks : []
         List {
-            if filter.isEmpty, !library.tracks.isEmpty {
-                LibraryHeader(mix: player.mix, tracks: library.tracks)
-                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            if !searching {
+                chips
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     .listRowSeparator(.hidden)
             }
-            if filter.isEmpty {
-                PlaylistsSection()
-                if !library.tracks.isEmpty { SmartPlaylistsSection() }
-            }
-            if !starred.isEmpty {
-                Section("Starred") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(spacing: 12) {
-                            ForEach(Array(starred.enumerated()), id: \.element.id) { offset, track in
-                                Button { player.play(starred, startAt: offset) } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        ArtworkThumbnail(track: track, size: 110)
-                                        Text(library.title(of: track)).font(.caption.weight(.semibold)).lineLimit(1)
-                                    }
-                                    .frame(width: 110)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+            if showSongs {
+                if !searching, !library.tracks.isEmpty {
+                    LibraryHeader(mix: player.mix, tracks: library.tracks)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 20, bottom: 8, trailing: 20))
+                        .listRowSeparator(.hidden)
                 }
-            }
-            ForEach(visible) { track in
-                LibrarySongRow(track: track, lyric: lyricLines[track.url]) {
-                    player.play(visible, startAt: visible.firstIndex(of: track) ?? 0)
-                } onNewPlaylist: {
-                    newPlaylistTrack = track
-                    namingPlaylist = true
+                ForEach(visible) { track in
+                    LibrarySongRow(track: track, lyric: lyricLines[track.url]) {
+                        player.play(visible, startAt: visible.firstIndex(of: track) ?? 0)
+                    } onNewPlaylist: {
+                        newPlaylistTrack = track
+                        namingPlaylist = true
+                    }
+                    .listRowSeparator(.hidden)
+                }
+            } else if library.loaded, !library.tracks.isEmpty || !library.playlists.isEmpty {
+                sortRow
+                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
+                    .listRowSeparator(.hidden)
+                ForEach(entries) { entry in
+                    // A hidden link: the row opens its page without the
+                    // list's chevron.
+                    ZStack {
+                        NavigationLink(value: entry.link) { EmptyView() }.opacity(0)
+                        LibraryEntryRow(entry: entry)
+                    }
+                    .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
+                    .listRowSeparator(.hidden)
+                    .swipeActions {
+                        if case .playlist(let id) = entry.link {
+                            Button("Delete", role: .destructive) { library.deletePlaylist(id) }
+                        }
+                    }
                 }
             }
         }
+        .listStyle(.plain)
         .overlay {
-            if library.loaded, library.tracks.isEmpty {
+            if library.loaded, library.tracks.isEmpty, library.playlists.isEmpty {
                 ContentUnavailableView(
                     "No Music Yet",
                     systemImage: "music.note.list",
@@ -86,8 +95,17 @@ struct MusicLibraryView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { importing = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add songs from Files")
+                Menu {
+                    Button { creatingPlaylist = true } label: {
+                        Label("New Playlist", systemImage: "music.note.list")
+                    }
+                    Button { importing = true } label: {
+                        Label("Add Songs from Files", systemImage: "folder.badge.plus")
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Add")
             }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: MusicLibrary.importTypes,
@@ -113,12 +131,19 @@ struct MusicLibraryView: View {
             }
         }
         .sensoryFeedback(.success, trigger: importedCount) { _, new in (new ?? 0) > 0 }
+        .sensoryFeedback(.selection, trigger: chip)
         .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Songs, artists or a line of lyrics")
-        .navigationTitle("Library")
-        .navigationDestination(for: Playlist.self) { PlaylistView(id: $0.id) }
-        .navigationDestination(for: SmartPlaylist.self) { SmartPlaylistView(kind: $0) }
+        .navigationTitle("Your Library")
+        .navigationDestination(for: LibraryCollection.self) { collection in
+            if case .playlist(let id) = collection {
+                PlaylistView(id: id)
+            } else {
+                CollectionView(collection: collection)
+            }
+        }
         .modifier(NewPlaylistAlert(isPresented: $namingPlaylist, track: newPlaylistTrack))
+        .modifier(NewPlaylistAlert(isPresented: $creatingPlaylist, track: nil))
         .refreshable { await library.refresh() }
         .onAppear { library.reload() }
         // Searching runs off the main thread a moment after you stop typing.
@@ -132,6 +157,107 @@ struct MusicLibraryView: View {
             let found = await library.search(needle)
             if !Task.isCancelled { hits = found }
         }
+    }
+
+    // MARK: Chips and sorting
+
+    /// Playlists, Songs, Albums, Artists. Tap one to show only that; the
+    /// cross (or a second tap) shows everything again.
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if chip != nil {
+                    Button { withAnimation(.snappy(duration: 0.2)) { chip = nil } } label: {
+                        Image(systemName: "xmark").font(.footnote.weight(.bold))
+                            .frame(width: 34, height: 34)
+                            .background(Color(white: 0.17), in: Circle())
+                    }
+                    .accessibilityLabel("Show everything")
+                    .transition(.scale.combined(with: .opacity))
+                }
+                ForEach(LibraryFilter.allCases.filter { chip == nil || chip == $0 }) { option in
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) { chip = chip == option ? nil : option }
+                    } label: {
+                        Text(option.rawValue).font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 16).frame(height: 34)
+                            .foregroundStyle(chip == option ? Color.black : Color.primary)
+                            .background(chip == option ? Color.brand : Color(white: 0.17), in: Capsule())
+                    }
+                }
+            }
+            .buttonStyle(PressScaleStyle())
+            .padding(.horizontal, 20)
+        }
+    }
+
+    private var sortRow: some View {
+        Button { sortByName.toggle() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.up.arrow.down").font(.footnote.weight(.semibold))
+                Text(sortByName ? "A to Z" : "Recents").font(.subheadline.weight(.medium))
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Sort: \(sortByName ? "A to Z" : "Recents")")
+    }
+
+    /// The big rows: All Songs and Starred pinned on top, then your
+    /// playlists, Made for You, albums and artists, as the chips allow.
+    private var entries: [LibraryEntry] {
+        var pinned: [LibraryEntry] = []
+        var rest: [LibraryEntry] = []
+        func songs(_ count: Int) -> String { "\(count) song\(count == 1 ? "" : "s")" }
+
+        if chip == nil || chip == .playlists {
+            if !library.tracks.isEmpty {
+                pinned.append(LibraryEntry(id: "all", title: "All Songs",
+                                           subtitle: "Playlist • " + songs(library.tracks.count),
+                                           cover: .symbol("music.note"), link: .allSongs, pinned: true))
+            }
+            let starred = library.favourites.count
+            if starred > 0 {
+                pinned.append(LibraryEntry(id: "starred", title: "Starred", subtitle: "Playlist • " + songs(starred),
+                                           cover: .symbol("star.fill"), link: .starred, pinned: true))
+            }
+            for playlist in library.playlists {
+                let tracks = library.tracks(in: playlist)
+                rest.append(LibraryEntry(id: playlist.id.uuidString, title: playlist.name,
+                                         subtitle: "Playlist • " + songs(tracks.count),
+                                         cover: .tracks(tracks), link: .playlist(playlist.id), date: playlist.created))
+            }
+            if !library.tracks.isEmpty {
+                for kind in SmartPlaylist.allCases {
+                    rest.append(LibraryEntry(id: "smart." + kind.rawValue, title: kind.name,
+                                             subtitle: "Playlist • Made for you",
+                                             cover: .symbol(kind.symbol), link: .smart(kind)))
+                }
+            }
+        }
+        if chip == nil || chip == .albums {
+            for album in library.albums() where chip == .albums || album.tracks.count > 1 {
+                rest.append(LibraryEntry(id: "album." + album.name, title: album.name,
+                                         subtitle: album.artist.isEmpty ? "Album" : "Album • " + album.artist,
+                                         cover: .tracks(Array(album.tracks.prefix(1))), link: .album(album.name),
+                                         date: album.newest))
+            }
+        }
+        if chip == .artists {
+            for artist in library.artists() {
+                rest.append(LibraryEntry(id: "artist." + artist.name, title: artist.name,
+                                         subtitle: "Artist • " + songs(artist.tracks.count),
+                                         cover: .artist(artist.tracks.first), link: .artist(artist.name),
+                                         date: artist.newest))
+            }
+        }
+        rest.sort { first, second in
+            sortByName
+                ? first.title.localizedCaseInsensitiveCompare(second.title) == .orderedAscending
+                : first.date > second.date
+        }
+        return pinned + rest
     }
 }
 
@@ -221,81 +347,7 @@ private struct LibrarySongRow: View {
     }
 }
 
-/// Library › Made for You: lists that fill themselves.
-private struct SmartPlaylistsSection: View {
-    var body: some View {
-        Section("Made for You") {
-            ForEach(SmartPlaylist.allCases) { kind in
-                NavigationLink(value: kind) {
-                    Label {
-                        Text(kind.name).font(.subheadline.weight(.semibold))
-                    } icon: {
-                        Image(systemName: kind.symbol).foregroundStyle(Color.brand)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// One smart playlist: what it is, Play, Shuffle and its songs.
-struct SmartPlaylistView: View {
-    @EnvironmentObject private var library: MusicLibrary
-    @EnvironmentObject private var player: MusicPlayer
-    let kind: SmartPlaylist
-    @State private var tracks: [Track] = []
-
-    var body: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(kind.detail).font(.subheadline).foregroundStyle(.secondary)
-                    HStack(spacing: 12) {
-                        Button { player.play(tracks, startAt: 0) } label: {
-                            Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button { player.play(tracks.shuffled(), startAt: 0) } label: {
-                            Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .controlSize(.large)
-                    .disabled(tracks.isEmpty)
-                }
-                .listRowBackground(Color.clear)
-            }
-            Section {
-                ForEach(Array(tracks.enumerated()), id: \.element.id) { offset, track in
-                    Button { player.play(tracks, startAt: offset) } label: {
-                        HStack(spacing: 12) {
-                            ArtworkThumbnail(track: track, size: 42)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                                    .foregroundStyle(player.current == track ? Color.brand : .primary)
-                                Text(library.subtitle(of: track)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .overlay {
-            if tracks.isEmpty {
-                ContentUnavailableView("Nothing Here Yet", systemImage: kind.symbol,
-                                       description: Text("This list fills up as you add, star and play music."))
-            }
-        }
-        .navigationTitle(kind.name)
-        .navigationBarTitleDisplayMode(.inline)
-        // Worked out when the page opens, so it doesn't reshuffle under you.
-        .onAppear { tracks = library.tracks(in: kind) }
-    }
-}
-
-/// Spotify-style playlist header: song count, Mix and Shuffle chips and the
+/// Songs header: song count, Mix and Shuffle chips and the
 /// glowing play button that plays the whole library as a mix.
 private struct LibraryHeader: View {
     @EnvironmentObject private var player: MusicPlayer

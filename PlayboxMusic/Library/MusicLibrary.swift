@@ -91,8 +91,80 @@ struct LibraryHit: Sendable {
 /// Lists audio files downloaded into Documents/Music (also visible in the Files app).
 @MainActor
 final class MusicLibrary: ObservableObject {
-    @Published private(set) var tracks: [Track] = [] { didSet { titleIndex = nil } }
-    @Published private(set) var metadata: [String: TrackMeta] = [:] { didSet { titleIndex = nil } }
+    @Published private(set) var tracks: [Track] = [] { didSet { dropIndexes() } }
+    @Published private(set) var metadata: [String: TrackMeta] = [:] { didSet { dropIndexes() } }
+
+    /// Songs grouped into an album or an artist, for the Library page.
+    struct SongGroup: Identifiable {
+        let name: String
+        /// The album's artist; empty for an artist group.
+        let artist: String
+        let tracks: [Track]
+        /// When its newest song was added.
+        let newest: Date
+        var id: String { name }
+    }
+
+    // Built the first time they are asked for and dropped when songs or
+    // details change, so pages don't regroup the library on every redraw.
+    private var keyIndex: [String: Track]?
+    private var albumIndex: [SongGroup]?
+    private var artistIndex: [SongGroup]?
+
+    private func dropIndexes() {
+        titleIndex = nil
+        keyIndex = nil
+        albumIndex = nil
+        artistIndex = nil
+    }
+
+    private func byKey() -> [String: Track] {
+        if let keyIndex { return keyIndex }
+        let built = Dictionary(tracks.map { (key(for: $0.url), $0) }, uniquingKeysWith: { first, _ in first })
+        keyIndex = built
+        return built
+    }
+
+    private func groups(by name: (TrackMeta) -> String?, inFileOrder: Bool) -> [SongGroup] {
+        var found: [String: [Track]] = [:]
+        for track in tracks {
+            guard let meta = metadata[key(for: track.url)], let value = name(meta), !value.isEmpty else { continue }
+            found[value, default: []].append(track)
+        }
+        return found.map { name, songs in
+            // Album files usually start with the track number.
+            let ordered = inFileOrder
+                ? songs.sorted { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+                : songs
+            return SongGroup(name: name, artist: inFileOrder ? (meta(for: songs[0])?.artist ?? "") : "",
+                         tracks: ordered, newest: songs.map(\.addedAt).max() ?? .distantPast)
+        }
+    }
+
+    func albums() -> [SongGroup] {
+        if let albumIndex { return albumIndex }
+        let built = groups(by: { $0.album }, inFileOrder: true)
+        albumIndex = built
+        return built
+    }
+
+    func artists() -> [SongGroup] {
+        if let artistIndex { return artistIndex }
+        let built = groups(by: { $0.artist }, inFileOrder: false)
+        artistIndex = built
+        return built
+    }
+
+    func tracks(in collection: LibraryCollection) -> [Track] {
+        switch collection {
+        case .allSongs: return tracks
+        case .starred: return favouriteTracks
+        case .smart(let kind): return tracks(in: kind)
+        case .album(let name): return albums().first { $0.name == name }?.tracks ?? []
+        case .artist(let name): return artists().first { $0.name == name }?.tracks ?? []
+        case .playlist(let id): return playlists.first { $0.id == id }.map { tracks(in: $0) } ?? []
+        }
+    }
     /// False until the first scan of the Music folder has finished.
     @Published private(set) var loaded = false
     @Published private(set) var favourites: Set<String> = []
@@ -241,10 +313,10 @@ final class MusicLibrary: ObservableObject {
 
     /// A playlist's songs that are still in the library, in order.
     func tracks(in playlist: Playlist) -> [Track] {
-        let byKey = Dictionary(tracks.map { (key(for: $0.url), $0) }, uniquingKeysWith: { first, _ in first })
+        let known = byKey()
         return playlist.items.compactMap { item -> Track? in
             let entry = Self.split(item)
-            guard var track = byKey[entry.key] else { return nil }
+            guard var track = known[entry.key] else { return nil }
             track.clip = entry.clip
             return track
         }

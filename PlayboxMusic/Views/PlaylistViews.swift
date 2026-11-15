@@ -99,40 +99,15 @@ struct PlaylistView: View {
         if let playlist {
             let tracks = library.tracks(in: playlist)
             List {
-                Section {
-                    VStack(spacing: 14) {
-                        PlaylistCover(tracks: tracks, size: 200)
-                            .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
-                        Text(playlist.name).font(.title2.weight(.bold)).tracking(-0.4)
-                        Text("\(tracks.count) song\(tracks.count == 1 ? "" : "s")")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        HStack(spacing: 12) {
-                            Button { player.play(tracks, startAt: 0) } label: {
-                                Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            Button {
-                                guard !tracks.isEmpty else { return }
-                                player.play(tracks.shuffled(), startAt: 0)
-                            } label: {
-                                Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                        .controlSize(.large)
-                        .disabled(tracks.isEmpty)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .listRowBackground(Color.clear)
-                }
+                CollectionHeader(title: playlist.name, tracks: tracks)
                 Section {
                     ForEach(Array(tracks.enumerated()), id: \.offset) { offset, track in
                         Button { player.play(tracks, startAt: offset) } label: {
                             HStack(spacing: 12) {
-                                ArtworkThumbnail(track: track, size: 42)
+                                ArtworkThumbnail(track: track, size: 52)
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 4) {
-                                        Text(library.title(of: track)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                        Text(library.title(of: track)).font(.body).lineLimit(1)
                                             .foregroundStyle(player.current == track ? Color.brand : .primary)
                                         if library.isFavourite(track) { StarMark() }
                                     }
@@ -177,14 +152,23 @@ struct PlaylistView: View {
                     }
                     .onDelete { library.removeFromPlaylist(id, at: $0) }
                     .onMove { library.movePlaylistItems(id, from: $0, to: $1) }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
                     Button {
                         adding = true
                     } label: {
                         Label("Add Songs", systemImage: "plus").foregroundStyle(Color.brand)
                     }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20))
                 }
             }
-            .navigationTitle(playlist.name)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background { CollectionBackdrop() }
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
