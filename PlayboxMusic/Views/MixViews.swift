@@ -423,7 +423,7 @@ private struct TransitionEditor: View {
                         if !mix.isOn { mixOffBanner }
                         MixTimeline(outgoing: outgoing, incoming: incoming, plan: plan, pair: pair,
                                     held: $timelineHeld,
-                                    onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0) })
+                                    onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0, start: plan.mixStart) })
                             .frame(height: 336)
                             .overlay { previewButton(plan) }
                             .overlay(alignment: .bottom) { barsMenu(plan).offset(y: 18) }
@@ -650,8 +650,11 @@ private struct TransitionEditor: View {
         commit(value)
     }
 
-    private func setEntry(_ seconds: Double) {
+    private func setEntry(_ seconds: Double, start: Double) {
         var value = custom
+        // A first song moved past its end is stored as a later entry for the
+        // next one; pin the start where it is shown so that isn't counted twice.
+        if value.mixStart != nil { value.mixStart = start }
         value.entry = seconds
         commit(value)
     }
@@ -763,7 +766,9 @@ private struct MixTimeline: View {
     private var window: ClosedRange<Double> {
         if let drag { return drag.window }
         let pad = max(plan.length * 0.3, plan.beat * 4)
-        return (plan.mixStart - pad)...(plan.mixEnd + pad)
+        // Keep a next song that was pushed later in view.
+        let inStart = plan.mixStart - min(0, plan.entry) / Double(max(0.25, plan.inRate))
+        return (plan.mixStart - pad)...(max(plan.mixEnd, inStart + plan.beat * 4) + pad)
     }
 
     var body: some View {
@@ -780,6 +785,7 @@ private struct MixTimeline: View {
                 // sideways drag always moves the waveform (and holds the page
                 // still), an up or down one scrolls.
                 .simultaneousGesture(dragGesture(size: size))
+                .overlay { nudges }
             }
             .onDragCancelled(touching, stillBusy: { drag != nil || scrolling || held }) {
                 drag = nil
@@ -792,6 +798,77 @@ private struct MixTimeline: View {
         .accessibilityElement()
         .accessibilityLabel("Transition waveform, \(plan.bars) bars")
         .accessibilityHint("Drag the top song to move the blend, the bottom song to change where it comes in.")
+    }
+
+    // MARK: Fine moves
+
+    /// One step of the arrows: 10 milliseconds.
+    private static let step = 0.01
+
+    /// Two arrows on each song. Each tap moves only that song 10 ms the way
+    /// the arrow points; hold an arrow to keep moving.
+    private var nudges: some View {
+        VStack(spacing: 0) {
+            nudgeRow(.outgoing, time: shown.mixStart, label: "Out")
+            nudgeRow(.incoming, time: shown.entry, label: "In")
+        }
+        .padding(.vertical, 6)
+        .opacity(drag == nil ? 1 : 0)
+        .animation(.easeOut(duration: 0.15), value: drag == nil)
+    }
+
+    private func nudgeRow(_ lane: Lane, time: Double, label: String) -> some View {
+        HStack(spacing: 0) {
+            arrow(lane, direction: -1)
+            Spacer(minLength: 0)
+            arrow(lane, direction: 1)
+        }
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: lane == .outgoing ? .top : .bottom) {
+            Text("\(label) \(Self.stamp(time))")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.black.opacity(0.45), in: Capsule())
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func arrow(_ lane: Lane, direction: Double) -> some View {
+        Button { nudge(lane, direction: direction) } label: {
+            Image(systemName: direction < 0 ? "chevron.left" : "chevron.right")
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(.black.opacity(0.5), in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressScaleStyle())
+        .buttonRepeatBehavior(.enabled)
+        .sensoryFeedback(.selection, trigger: lane == .outgoing ? plan.mixStart : plan.entry)
+        .accessibilityLabel("\(lane == .outgoing ? "First" : "Second") song \(direction < 0 ? "earlier" : "later") by 10 milliseconds")
+    }
+
+    /// Moves one song 10 ms. Moving a song right on screen means its part
+    /// of the blend comes from earlier in it.
+    private func nudge(_ lane: Lane, direction: Double) {
+        switch lane {
+        case .outgoing:
+            onMoveStart(min(max(0, plan.mixStart - direction * Self.step), outgoing.duration + 30))
+        case .incoming:
+            let value = plan.entry - direction * Self.step * Double(plan.inRate)
+            onMoveEntry(min(max(-60, value), max(0, incoming.duration - 0.5)))
+        }
+    }
+
+    /// 1:52.340
+    private static func stamp(_ seconds: Double) -> String {
+        let sign = seconds < 0 ? "−" : ""
+        let value = abs(seconds)
+        let minutes = Int(value / 60)
+        return sign + String(format: "%d:%06.3f", minutes, value - Double(minutes) * 60)
     }
 
     /// Drag along this bar to move playback through the transition.
@@ -967,14 +1044,23 @@ private struct MixTimeline: View {
                 guard let current = drag else { return }
                 let span = current.window.upperBound - current.window.lowerBound
                 let seconds = Double(value.translation.width / size.width) * span
+                // Each song moves on its own and follows the finger freely;
+                // it only clicks onto a beat when it passes close to one.
+                func magnet(_ raw: Double, _ analysis: TrackAnalysis) -> Double {
+                    let beat = analysis.snapToBeat(raw)
+                    return abs(beat - raw) < 0.06 ? beat : raw
+                }
                 switch current.lane {
                 case .outgoing:
-                    // Moving the outgoing song left starts the blend later in it.
-                    let target = outgoing.snapToBeat(current.origin - seconds)
-                    drag?.value = min(max(0, target), max(0, outgoing.duration - plan.length))
+                    // Moving the outgoing song left starts the blend later in
+                    // it, all the way to its end and past it (a gap).
+                    let target = magnet(current.origin - seconds, outgoing)
+                    drag?.value = min(max(0, target), outgoing.duration + 30)
                 case .incoming:
-                    let target = incoming.snapToBeat(current.origin - seconds * Double(plan.inRate))
-                    drag?.value = min(max(0, target), max(0, incoming.duration - plan.length))
+                    // The next song can be pushed later than the blend's start
+                    // (it waits) or started from deep inside it.
+                    let target = magnet(current.origin - seconds * Double(plan.inRate), incoming)
+                    drag?.value = min(max(-60, target), max(0, incoming.duration - 0.5))
                 }
             }
             .onEnded { _ in

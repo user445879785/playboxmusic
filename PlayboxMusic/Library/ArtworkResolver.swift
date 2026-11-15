@@ -180,7 +180,10 @@ actor ArtworkResolver {
         // Without the song's details the lookup is a guess; don't treat a
         // failed guess as final.
         var certain = meta != nil
-        if image == nil {
+        // Online lookups are add-ons; while one is off, a miss isn't final,
+        // so turning it on later still finds covers.
+        if !AddOn.coverFinder.isOn || !AddOn.coverArtArchive.isOn { certain = false }
+        if image == nil, AddOn.coverFinder.isOn {
             let term = [meta?.artist, meta?.title ?? MusicText.clean(file.deletingPathExtension().lastPathComponent)]
                 .compactMap { $0 }.joined(separator: " ")
             if term.isEmpty {
@@ -200,10 +203,44 @@ actor ArtworkResolver {
             }
         }
 
+        if image == nil, AddOn.coverArtArchive.isOn, let artist = meta?.artist, let album = meta?.album {
+            await shared.acquireLookup()
+            if let url = await coverArtArchive(artist: artist, album: album) {
+                image = await remote(url, size: size, originals: originals)
+            } else {
+                certain = false
+            }
+            await shared.releaseLookup()
+        }
+
         if let image, let data = image.jpegData(compressionQuality: 0.86) {
             try? data.write(to: thumbnail, options: .atomic)
         }
         return Loaded(image: image, nothingFound: image == nil && certain)
+    }
+
+    /// The front cover of the album's best MusicBrainz match, if it has one.
+    private static func coverArtArchive(artist: String, album: String) async -> URL? {
+        struct Response: Decodable {
+            struct Release: Decodable { let id: String; let score: Int? }
+            let releases: [Release]
+        }
+        let clean = { (text: String) in text.replacingOccurrences(of: "\"", with: "") }
+        var components = URLComponents(string: "https://musicbrainz.org/ws/2/release/")!
+        components.queryItems = [
+            URLQueryItem(name: "query", value: "artist:\"\(clean(artist))\" AND release:\"\(clean(album))\""),
+            URLQueryItem(name: "fmt", value: "json"),
+            URLQueryItem(name: "limit", value: "1")
+        ]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        // MusicBrainz asks every app to name itself.
+        request.setValue("PlayboxMusic/1.0 (personal music player)", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let release = (try? JSONDecoder().decode(Response.self, from: data))?.releases.first,
+              (release.score ?? 100) >= 90 else { return nil }
+        return URL(string: "https://coverartarchive.org/release/\(release.id)/front-500")
     }
 
     /// Downloads a cover once (kept in Caches/Artwork) and shrinks it.

@@ -182,6 +182,8 @@ enum SearchHelper {
 
     /// The most played songs matching the words, typos forgiven.
     static func popular(_ term: String) async -> [Hit] {
+        // Smart Search is an add-on you can turn off in Settings › Add-ons.
+        guard AddOn.smartSearch.isOn else { return [] }
         var components = URLComponents(string: "https://api.deezer.com/search")!
         components.queryItems = [URLQueryItem(name: "q", value: term), URLQueryItem(name: "limit", value: "50")]
         guard let url = components.url,

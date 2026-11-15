@@ -71,7 +71,8 @@ actor LyricsService {
         }
 
         var lines: [LyricLine] = []
-        if let artist {
+        let lrclib = AddOn.lrclib.isOn
+        if lrclib, let artist {
             var query = [
                 URLQueryItem(name: "track_name", value: title),
                 URLQueryItem(name: "artist_name", value: artist)
@@ -80,12 +81,16 @@ actor LyricsService {
             if let duration, duration > 0 { query.append(URLQueryItem(name: "duration", value: String(Int(duration)))) }
             if let response: Response = await fetch("get", query) { lines = Self.parse(response) }
         }
-        if lines.isEmpty {
+        if lrclib, lines.isEmpty {
             let term = [artist, title].compactMap { $0 }.joined(separator: " ")
             if let results: [Response] = await fetch("search", [URLQueryItem(name: "q", value: term)]),
                let best = results.first(where: { $0.syncedLyrics != nil }) ?? results.first {
                 lines = Self.parse(best)
             }
+        }
+        // Second source (an add-on): plain lyrics from lyrics.ovh.
+        if lines.isEmpty, AddOn.lyricsOvh.isOn, let artist {
+            lines = await Self.lyricsOvh(title: title, artist: artist)
         }
         cache[key] = lines
         // Only real lyrics are saved; a miss is asked again another day.
@@ -96,6 +101,22 @@ actor LyricsService {
             texts?[key] = lines.map(\.text).joined(separator: "\n")
         }
         return lines
+    }
+
+    private struct OvhResponse: Decodable { let lyrics: String? }
+
+    private static func lyricsOvh(title: String, artist: String) async -> [LyricLine] {
+        let parts = [artist, title].map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? $0 }
+        guard let url = URL(string: "https://api.lyrics.ovh/v1/\(parts[0])/\(parts[1])"),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let text = (try? JSONDecoder().decode(OvhResponse.self, from: data))?.lyrics else { return [] }
+        return text.replacingOccurrences(of: "\r", with: "")
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .enumerated()
+            .map { LyricLine(id: $0.offset, time: nil, text: $0.element) }
     }
 
     private func fetch<T: Decodable>(_ path: String, _ query: [URLQueryItem]) async -> T? {

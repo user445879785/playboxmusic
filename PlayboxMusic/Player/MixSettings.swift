@@ -269,11 +269,20 @@ final class MixSettings: ObservableObject {
         if ratio != nil, let inBeat = incoming?.firstBeat, inBeat >= entry - 0.05 { entry = inBeat }
         if let value = custom.mixStart { start = value }
         if let value = custom.entry { entry = value }
+        // Moved past the end of the first song: it plays to its last sample,
+        // then the next one waits for the rest (a gap you chose).
+        let latest = max(0, outDuration - 0.02)
+        if start > latest {
+            entry -= (start - latest) * (ratio ?? 1)
+            start = latest
+        }
 
         let edited = custom.volume != nil || custom.eq != nil || custom.effect != nil
         let shownPreset: MixPreset? = edited ? MixPreset.matching(volume, eq, effect) : preset
         return TransitionPlan(
-            mixStart: max(0, min(start, max(0, outDuration - 0.5))), entry: max(0, entry),
+            // A negative entry means the next song starts that much after the
+            // blend begins, so it can be pushed past where it would normally fit.
+            mixStart: max(0, start), entry: max(-60, entry),
             length: length, bars: bars, volume: volume, eq: eq, effect: effect, preset: shownPreset,
             outGain: gains.0, inGain: gains.1, inRate: ratio ?? 1, beat: beat
         )

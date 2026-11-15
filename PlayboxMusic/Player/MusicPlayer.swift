@@ -858,10 +858,15 @@ final class MusicPlayer: ObservableObject {
         let ahead = (plan.mixStart - deck.currentTime) / rate
         let late = max(0, -ahead)
         mixStartedAt = Date().addingTimeInterval(ahead)
-        let when = ahead > 0.02
-            ? AVAudioTime(hostTime: mach_absolute_time() + AVAudioTime.hostTime(forSeconds: ahead))
+        // Where the next song should be by now; below zero it hasn't started
+        // yet (pushed later than the blend) and waits that long.
+        let inRate = Double(max(0.25, plan.inRate))
+        let from = plan.entry + late * inRate
+        let wait = max(0, ahead) + max(0, -from) / inRate
+        let when = wait > 0.02
+            ? AVAudioTime(hostTime: mach_absolute_time() + AVAudioTime.hostTime(forSeconds: wait))
             : nil
-        incoming.play(from: plan.entry + late * Double(plan.inRate), at: when) { [weak self] in self?.trackEnded() }
+        incoming.play(from: max(0, from), at: when) { [weak self] in self?.trackEnded() }
     }
 
     /// Sets volume, bass EQ and effects for both decks at progress t.

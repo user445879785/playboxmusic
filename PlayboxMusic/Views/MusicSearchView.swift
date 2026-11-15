@@ -17,6 +17,7 @@ struct MusicSearchView: View {
     /// Set when a typo was fixed: what the results are really for.
     @State private var correction: String?
     @AppStorage("music.recentSearches") private var recentStore = ""
+    @ObservedObject private var addOns = AddOnStore.shared
 
     private var recentSearches: [String] {
         recentStore.split(separator: "\n").map(String.init)
@@ -30,6 +31,8 @@ struct MusicSearchView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case catalog = "Catalog"
         case soulseek = "Soulseek"
+        /// Only when the Internet Archive add-on is on.
+        case archive = "Archive"
         var id: String { rawValue }
     }
 
@@ -91,14 +94,16 @@ struct MusicSearchView: View {
         List {
             Section {
                 Picker("Search", selection: $mode) {
-                    ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(Mode.allCases.filter { $0 != .archive || addOns.isOn(.internetArchive) }) {
+                        Text($0.rawValue).tag($0)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets())
             }
 
-            if !client.isConnected {
+            if !client.isConnected, mode != .archive {
                 Section {
                     NavigationLink {
                         MusicAccountView()
@@ -115,7 +120,9 @@ struct MusicSearchView: View {
                         .listRowBackground(Color.clear)
                 }
             }
-            if mode == .catalog {
+            if mode == .archive {
+                ArchiveResultsSection(query: query)
+            } else if mode == .catalog {
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     CatalogHomeView(recentSearches: recentSearches) { term in query = term }
                 } else {
@@ -247,6 +254,11 @@ struct MusicSearchView: View {
             // Remember searches the user settled on.
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
             if !newAlbums.isEmpty || !newSongs.isEmpty { remember(term) }
+        }
+        .navigationDestination(for: InternetArchive.Item.self) { ArchiveItemView(item: $0) }
+        // Turning the Archive add-on off while on its tab goes back to the catalogue.
+        .onChange(of: addOns.isOn(.internetArchive)) { _, on in
+            if !on, mode == .archive { mode = .catalog }
         }
         .navigationDestination(for: ITunesItem.self) { item in
             if item.wrapperType == "artist" { ArtistView(artist: item) } else { AlbumDetailView(album: item) }

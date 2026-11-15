@@ -45,6 +45,16 @@ struct MusicAccountView: View {
             Section("Sound") {
                 Button("Equalizer") { showEqualizer = true }
             }
+
+            Section {
+                NavigationLink {
+                    AddOnStoreView()
+                } label: {
+                    Label("Add-ons", systemImage: "puzzlepiece.extension.fill")
+                }
+            } footer: {
+                Text("Extra search, song sources, lyrics and covers.")
+            }
             .id(appearance.accentHex)
 
             UpdatesSection()
