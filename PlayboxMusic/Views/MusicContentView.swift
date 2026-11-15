@@ -37,14 +37,7 @@ struct MusicContentView: View {
                 .dockClearance(clearance).tag("settings")
         }
         .overlay(alignment: .bottom) {
-            DockLayer(selection: $tab, accent: Color(uiColor: UIColor(somaHex: appearance.accentHex)),
-                      transparency: appearance.dockTransparency, scale: appearance.dockScale)
-                // Liquid Glass keeps the tint it was first drawn with; a new
-                // colour builds the dock again so it matches straight away.
-                .id(appearance.accentHex)
-                .frame(height: dockHeight)
-                .padding(.horizontal, 14)
-                .padding(.bottom, bottom)
+            DockLayer(selection: $tab, bottom: bottom)
                 .frame(maxHeight: .infinity, alignment: .bottom)
                 // Sits on the screen's edge and stays put (behind) when the keyboard opens.
                 .ignoresSafeArea(edges: .bottom)
@@ -115,9 +108,13 @@ struct MusicContentView: View {
 private struct DockLayer: View {
     @EnvironmentObject private var badge: DownloadBadge
     @Binding var selection: String
-    let accent: Color
-    let transparency: Double
-    let scale: Double
+    let bottom: CGFloat
+    // The dock keeps its own copy of the look and refreshes it whenever a
+    // setting changes, told two ways (the settings object and the saved
+    // settings), so Settings › Appearance always shows on the dock at once.
+    @State private var accentHex = Appearance.shared.accentHex
+    @State private var transparency = Appearance.shared.dockTransparency
+    @State private var scale = Appearance.shared.dockScale
 
     var body: some View {
         GlassDock(tabs: [
@@ -125,7 +122,28 @@ private struct DockLayer: View {
             ChromeTab(id: "downloads", title: "Downloads", symbol: "arrow.down.circle", badge: badge.active),
             ChromeTab(id: "library", title: "Library", symbol: "music.note.list"),
             ChromeTab(id: "settings", title: "Settings", symbol: "gearshape")
-        ], selection: $selection, accent: accent, transparency: transparency, scale: scale)
+        ], selection: $selection, accent: Color(uiColor: UIColor(somaHex: accentHex)),
+           transparency: transparency, scale: scale)
+        // Liquid Glass keeps the look it was first drawn with, so a new
+        // colour or transparency draws the dock again.
+        .id("\(accentHex)|\(transparency)")
+        .frame(height: GlassDock.baseHeight * scale)
+        .padding(.horizontal, 14)
+        .padding(.bottom, bottom)
+        .animation(.snappy(duration: 0.2), value: scale)
+        .onReceive(Appearance.shared.objectWillChange.receive(on: RunLoop.main)) { _ in reload() }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)) { _ in reload() }
+    }
+
+    private func reload() {
+        let defaults = UserDefaults.standard
+        let hex = defaults.string(forKey: Appearance.accentKey) ?? Appearance.defaultAccent
+        let clear = defaults.object(forKey: Appearance.transparencyKey) as? Double ?? 0.5
+        let size = defaults.object(forKey: Appearance.scaleKey) as? Double ?? 1
+        if hex != accentHex { accentHex = hex }
+        if clear != transparency { transparency = clear }
+        if size != scale { scale = size }
     }
 }
 

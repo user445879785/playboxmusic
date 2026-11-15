@@ -93,17 +93,28 @@ struct PlaylistView: View {
     @State private var adding = false
     @State private var passage: PassageTarget?
     @State private var editing: TransitionPair?
+    @State private var filter: String?
+    @State private var labels: [URL: Set<String>] = [:]
 
     private var playlist: Playlist? { library.playlists.first { $0.id == id } }
 
     var body: some View {
         if let playlist {
-            let tracks = library.tracks(in: playlist)
+            let all = library.tracks(in: playlist)
+            // With a filter on, only its songs show and play. Each keeps its
+            // place in the playlist, so passages and duplicates still apply.
+            let entries = Array(all.enumerated()).filter { _, track in
+                filter.map { labels[track.url]?.contains($0) == true } ?? true
+            }
+            let tracks = entries.map { $0.element }
             List {
                 CollectionHeader(title: playlist.name, tracks: tracks)
+                SongFilterBar(tracks: all, selected: $filter, labels: $labels)
                 Section {
-                    ForEach(Array(tracks.enumerated()), id: \.offset) { offset, track in
-                        Button { player.play(tracks, startAt: offset) } label: {
+                    ForEach(Array(entries.enumerated()), id: \.offset) { position, entry in
+                        let offset = entry.offset
+                        let track = entry.element
+                        Button { player.play(tracks, startAt: position) } label: {
                             HStack(spacing: 12) {
                                 ArtworkThumbnail(track: track, size: 52)
                                 VStack(alignment: .leading, spacing: 2) {
@@ -126,7 +137,7 @@ struct PlaylistView: View {
                         }
                         .buttonStyle(.plain)
                         // The mix into the next song, tap to edit it.
-                        .mixChip(to: tracks[safe: offset + 1], from: track, mix: player.mix) { editing = $0 }
+                        .mixChip(to: tracks[safe: position + 1], from: track, mix: player.mix) { editing = $0 }
                         // The same song (or the same passage) can be in a
                         // playlist as often as you like.
                         .swipeActions(edge: .leading) {
@@ -153,8 +164,10 @@ struct PlaylistView: View {
                             }
                         }
                     }
-                    .onDelete { library.removeFromPlaylist(id, at: $0) }
+                    .onDelete { library.removeFromPlaylist(id, at: IndexSet($0.map { entries[$0].offset })) }
                     .onMove { library.movePlaylistItems(id, from: $0, to: $1) }
+                    // Reordering a filtered list would mix up the hidden songs.
+                    .moveDisabled(filter != nil)
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))

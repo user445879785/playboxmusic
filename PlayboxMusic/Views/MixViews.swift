@@ -260,7 +260,10 @@ private struct MixQueueList: View {
             if mix.isOn, !isEditing, offset >= player.index, let next = player.queue[safe: offset + 1] {
                 TransitionChip(
                     label: transitionLabel(from: track, to: next, offset: offset),
-                    progress: isCurrent && player.isMixing ? player.clock : nil
+                    progress: isCurrent && player.isMixing ? player.clock : nil,
+                    onReset: mix.transitionOverride(from: track, to: next).isEmpty ? nil : {
+                        withAnimation(.snappy) { mix.setOverride(nil, from: track, to: next) }
+                    }
                 ) {
                     editing = TransitionPair(from: track, to: next)
                 }
@@ -330,6 +333,8 @@ private struct Collage: View {
 struct TransitionChip: View {
     let label: String
     let progress: PlaybackClock?
+    /// Shown as an × when this transition was changed: back to the default.
+    var onReset: (() -> Void)?
     let action: () -> Void
 
     var body: some View {
@@ -356,7 +361,20 @@ struct TransitionChip: View {
             }
             .buttonStyle(PressScaleStyle())
             .accessibilityLabel("Transition: \(label). Edit")
+            if let onReset {
+                Button(action: onReset) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 30, height: 30)
+                        .background(Color(white: 0.16), in: Circle())
+                }
+                .buttonStyle(PressScaleStyle())
+                .transition(.scale.combined(with: .opacity))
+                .accessibilityLabel("Use the default transition")
+            }
         }
+        .animation(.snappy(duration: 0.2), value: onReset == nil)
     }
 }
 
@@ -429,9 +447,9 @@ private struct TransitionEditor: View {
                                     onPreview: { startPreview(plan, at: $0) })
                             .frame(height: 380)
                             .overlay { previewButton(plan) }
-                            .overlay(alignment: .bottom) { barsMenu(plan).offset(y: 18) }
                             .padding(.horizontal, 16)
-                            .padding(.bottom, 14)
+                        // Below the waveform and its slider, clear of both.
+                        barsMenu(plan)
 
                         VStack(spacing: 12) {
                             MixTrackRow(track: pair.from, analysis: outgoing, lane: "Out")

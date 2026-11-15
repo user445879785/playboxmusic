@@ -124,6 +124,16 @@ actor TrackAnalyzer {
 
     func cached(_ url: URL) -> TrackAnalysis? { memory[Self.key(url)] }
 
+    /// An analysis already made, without working one out (for filters that
+    /// mustn't decode a whole playlist).
+    func stored(for url: URL) -> TrackAnalysis? {
+        let key = Self.key(url)
+        if let value = memory[key] { return value }
+        let file = directory.appendingPathComponent(key + ".json")
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(TrackAnalysis.self, from: data)
+    }
+
     func analysis(for url: URL) async -> TrackAnalysis? {
         let key = Self.key(url)
         if let value = memory[key] { return value }

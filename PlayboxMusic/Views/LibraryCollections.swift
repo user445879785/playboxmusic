@@ -93,7 +93,10 @@ struct ListTransitionChip: View {
 
     var body: some View {
         if mix.isOn {
-            TransitionChip(label: mix.label(from: from, to: to), progress: nil) {
+            TransitionChip(label: mix.label(from: from, to: to), progress: nil,
+                           onReset: mix.transitionOverride(from: from, to: to).isEmpty ? nil : {
+                               withAnimation(.snappy) { mix.setOverride(nil, from: from, to: to) }
+                           }) {
                 onTap(TransitionPair(from: from, to: to))
             }
             .padding(.leading, 18)
@@ -234,6 +237,8 @@ struct CollectionView: View {
     @State private var namingPlaylist = false
     @State private var newPlaylistTrack: Track?
     @State private var editing: TransitionPair?
+    @State private var filter: String?
+    @State private var labels: [URL: Set<String>] = [:]
 
     private var title: String {
         switch collection {
@@ -246,12 +251,15 @@ struct CollectionView: View {
     }
 
     var body: some View {
+        // With a filter on, only its songs show and play.
+        let shown = filter.map { chosen in tracks.filter { labels[$0.url]?.contains(chosen) == true } } ?? tracks
         List {
-            CollectionHeader(title: title, tracks: tracks)
-            ForEach(Array(tracks.enumerated()), id: \.element.id) { offset, track in
+            CollectionHeader(title: title, tracks: shown)
+            SongFilterBar(tracks: tracks, selected: $filter, labels: $labels)
+            ForEach(Array(shown.enumerated()), id: \.element.id) { offset, track in
                 let starred = library.isFavourite(track)
-                CollectionSongRow(track: track, next: tracks[safe: offset + 1], onTransition: { editing = $0 }) {
-                    player.play(tracks, startAt: offset)
+                CollectionSongRow(track: track, next: shown[safe: offset + 1], onTransition: { editing = $0 }) {
+                    player.play(shown, startAt: offset)
                 } menu: {
                     Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
                     Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
@@ -289,5 +297,82 @@ struct CollectionView: View {
         .onChange(of: library.favourites) { _, _ in
             if collection == .starred { tracks = library.tracks(in: collection) }
         }
+    }
+}
+
+// MARK: - Genre and mood filters
+
+/// Spotify-style filter chips for a list of songs: its genres (from the
+/// songs' tags or the catalogue) and moods (from tempo, for songs already
+/// measured). Tap one to show only those songs; × shows them all again.
+struct SongFilterBar: View {
+    @EnvironmentObject private var library: MusicLibrary
+    let tracks: [Track]
+    @Binding var selected: String?
+    @Binding var labels: [URL: Set<String>]
+
+    private struct Key: Hashable { let urls: [URL] }
+
+    /// Chips in order of how many songs they hold.
+    private var chips: [String] {
+        var counts: [String: Int] = [:]
+        for track in tracks { for label in labels[track.url] ?? [] { counts[label, default: 0] += 1 } }
+        return counts.filter { $0.value > 0 }.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+    }
+
+    var body: some View {
+        let options = chips
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if selected != nil {
+                    Button { withAnimation(.snappy(duration: 0.2)) { selected = nil } } label: {
+                        Image(systemName: "xmark").font(.footnote.weight(.bold))
+                            .frame(width: 34, height: 34)
+                            .background(Color(white: 0.17), in: Circle())
+                    }
+                    .accessibilityLabel("Show all songs")
+                    .transition(.scale.combined(with: .opacity))
+                }
+                ForEach(options.filter { selected == nil || selected == $0 }, id: \.self) { label in
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) { selected = selected == label ? nil : label }
+                    } label: {
+                        Text(label).font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 16).frame(height: 34)
+                            .foregroundStyle(selected == label ? Color.black : Color.primary)
+                            .background(selected == label ? Color.brand : Color(white: 0.17), in: Capsule())
+                    }
+                }
+            }
+            .buttonStyle(PressScaleStyle())
+            .padding(.horizontal, 20)
+        }
+        .frame(height: options.isEmpty ? 0 : 40)
+        .opacity(options.isEmpty ? 0 : 1)
+        .sensoryFeedback(.selection, trigger: selected)
+        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        // Worked out in the background, a song at a time, and kept.
+        .task(id: Key(urls: tracks.map(\.url))) {
+            for track in tracks where labels[track.url] == nil {
+                if Task.isCancelled { return }
+                let meta = library.meta(for: track)
+                let found = await Self.labels(for: track, artist: meta?.artist, title: meta?.title)
+                labels[track.url] = found
+            }
+        }
+    }
+
+    static func labels(for track: Track, artist: String?, title: String?) async -> Set<String> {
+        var found = Set<String>()
+        let genre = await GenreResolver.shared.genre(for: track.url, artist: artist, title: title)
+        if genre != .unknown { found.insert(genre.name) }
+        // Mood from tempo, only for songs already measured (measuring a whole
+        // playlist here would be slow).
+        if let bpm = await TrackAnalyzer.shared.stored(for: track.url)?.bpm {
+            found.insert(bpm < 98 ? "Chill" : bpm < 124 ? "Upbeat" : "Energetic")
+        }
+        return found
     }
 }
