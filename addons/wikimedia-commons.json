@@ -1,0 +1,14 @@
+{
+  "playbox": 1,
+  "id": "wikimedia-commons",
+  "name": "Wikimedia Commons",
+  "about": "Public domain and freely licensed recordings from Wikipedia's media library: classical, folk, anthems and historic recordings.",
+  "homepage": "https://commons.wikimedia.org",
+  "icon": "books.vertical.fill",
+  "search": {
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=40&gsrsearch=filetype%3Aaudio%20{query}&prop=imageinfo&iiprop=url",
+    "results": "query.pages",
+    "title": "title",
+    "audio": "imageinfo.0.url"
+  }
+}

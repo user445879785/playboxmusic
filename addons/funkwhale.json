@@ -1,0 +1,17 @@
+{
+  "playbox": 1,
+  "id": "funkwhale-open-audio",
+  "name": "Funkwhale (open.audio)",
+  "about": "A community-run Funkwhale server: free and openly licensed music shared across the fediverse.",
+  "homepage": "https://open.audio",
+  "icon": "point.3.connected.trianglepath.dotted",
+  "search": {
+    "url": "https://open.audio/api/v1/tracks/?q={query}&page_size=40&playable=true",
+    "results": "results",
+    "title": "title",
+    "artist": "artist.name",
+    "artwork": "album.cover.urls.medium_square_crop",
+    "audio": "https://open.audio{listen_url}",
+    "duration": "uploads.0.duration"
+  }
+}

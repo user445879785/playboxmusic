@@ -101,7 +101,7 @@ enum ITunesCatalog {
         try await get("lookup", [
             URLQueryItem(name: "id", value: String(artistId)),
             URLQueryItem(name: "entity", value: "song"),
-            URLQueryItem(name: "limit", value: "25")
+            URLQueryItem(name: "limit", value: "50")
         ])
         .filter { $0.wrapperType == "track" }
     }
@@ -191,6 +191,47 @@ enum SearchHelper {
               (response as? HTTPURLResponse)?.statusCode == 200,
               let decoded = try? JSONDecoder().decode(Response.self, from: data) else { return [] }
         return decoded.data
+    }
+
+    private struct ArtistResponse: Decodable {
+        struct Artist: Decodable {
+            let name: String
+            let picture_xl: String?
+            let nb_fan: Int?
+        }
+        let data: [Artist]
+    }
+
+    /// The artist's photo, for the artist page and the top result.
+    static func artistPicture(_ name: String) async -> URL? {
+        guard AddOn.smartSearch.isOn else { return nil }
+        var components = URLComponents(string: "https://api.deezer.com/search/artist")!
+        components.queryItems = [URLQueryItem(name: "q", value: name), URLQueryItem(name: "limit", value: "3")]
+        guard let url = components.url,
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(ArtistResponse.self, from: data) else { return nil }
+        let wanted = fold(name)
+        let best = decoded.data.first { fold($0.name) == wanted } ?? decoded.data.first
+        return best?.picture_xl.flatMap(URL.init(string:))
+    }
+
+    /// Lower case, no accents, no spaces or punctuation: "Beyoncé" = "beyonce".
+    static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// The artist you were most likely looking for, if the words name one:
+    /// typed exactly, nearly, or as the top match's artist.
+    static func topArtist(_ term: String, artists: [ITunesItem], hits: [Hit]) -> ITunesItem? {
+        let typed = fold(term)
+        guard typed.count >= 2 else { return nil }
+        if let exact = artists.first(where: { fold($0.artistName ?? "") == typed }) { return exact }
+        if let best = hits.first?.artist.name, fold(best).hasPrefix(typed) || typed.hasPrefix(fold(best)) {
+            return artists.first { fold($0.artistName ?? "") == fold(best) }
+        }
+        return artists.first { fold($0.artistName ?? "").hasPrefix(typed) && typed.count >= 4 }
     }
 
     static func key(artist: String?, title: String?) -> String {

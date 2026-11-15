@@ -92,6 +92,7 @@ struct PlaylistView: View {
     @State private var name = ""
     @State private var adding = false
     @State private var passage: PassageTarget?
+    @State private var editing: TransitionPair?
 
     private var playlist: Playlist? { library.playlists.first { $0.id == id } }
 
@@ -124,6 +125,8 @@ struct PlaylistView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        // The mix into the next song, tap to edit it.
+                        .mixChip(to: tracks[safe: offset + 1], from: track, mix: player.mix) { editing = $0 }
                         // The same song (or the same passage) can be in a
                         // playlist as often as you like.
                         .swipeActions(edge: .leading) {
@@ -195,6 +198,11 @@ struct PlaylistView: View {
             }
             .sheet(isPresented: $adding) {
                 AddSongsSheet(playlistID: id)
+                    .environmentObject(library)
+            }
+            .sheet(item: $editing) { pair in
+                TransitionEditorView(pair: pair)
+                    .environmentObject(player)
                     .environmentObject(library)
             }
             .sheet(item: $passage) { target in

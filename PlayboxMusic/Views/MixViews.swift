@@ -327,7 +327,7 @@ private struct Collage: View {
 }
 
 /// The small "✦ Auto ›" chip between two songs.
-private struct TransitionChip: View {
+struct TransitionChip: View {
     let label: String
     let progress: PlaybackClock?
     let action: () -> Void
@@ -401,6 +401,8 @@ private struct TransitionEditor: View {
     @State private var showSettings = false
     /// True while a waveform is being dragged, so the page holds still.
     @State private var timelineHeld = false
+    /// Plays the transition on its own, away from the real player.
+    @StateObject private var preview = TransitionPreview()
 
     private var custom: TransitionOverride { mix.transitionOverride(from: pair.from, to: pair.to) }
 
@@ -421,10 +423,11 @@ private struct TransitionEditor: View {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 18) {
                         if !mix.isOn { mixOffBanner }
-                        MixTimeline(outgoing: outgoing, incoming: incoming, plan: plan, pair: pair,
+                        MixTimeline(preview: preview, outgoing: outgoing, incoming: incoming, plan: plan, pair: pair,
                                     held: $timelineHeld,
-                                    onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0, start: plan.mixStart) })
-                            .frame(height: 336)
+                                    onMoveStart: { setStart($0) }, onMoveEntry: { setEntry($0, start: plan.mixStart) },
+                                    onPreview: { startPreview(plan, at: $0) })
+                            .frame(height: 380)
                             .overlay { previewButton(plan) }
                             .overlay(alignment: .bottom) { barsMenu(plan).offset(y: 18) }
                             .padding(.horizontal, 16)
@@ -466,6 +469,19 @@ private struct TransitionEditor: View {
         }
         .interactiveDismissDisabled(timelineHeld)
         .task { await load() }
+        .onDisappear { preview.stop() }
+        // A changed transition is heard straight away if it is playing.
+        .onChange(of: plan.map { [$0.mixStart, $0.entry, Double($0.bars)] }) { _, _ in
+            guard preview.isPlaying, let plan, let position = preview.position(at: Date()) else { return }
+            startPreview(plan, at: position)
+        }
+    }
+
+    /// The real song pauses where it is (press Play later and it carries on
+    /// from there); only the transition plays.
+    private func startPreview(_ plan: TransitionPlan, at position: Double) {
+        if player.isPlaying { player.togglePlayback() }
+        preview.play(plan, from: pair.from, to: pair.to, at: position)
     }
 
     private var topBar: some View {
@@ -507,12 +523,12 @@ private struct TransitionEditor: View {
     }
 
     private func previewButton(_ plan: TransitionPlan) -> some View {
-        let previewing = player.isPlaying && (player.current == pair.from || player.current == pair.to)
+        let previewing = preview.isPlaying
         return Button {
             if previewing {
-                player.togglePlayback()
+                preview.stop()
             } else {
-                player.previewTransition(from: pair.from, to: pair.to, at: plan.mixStart - plan.beat * 8)
+                startPreview(plan, at: -min(TransitionPreview.lead, max(plan.beat * 8, 2)))
             }
         } label: {
             Image(systemName: previewing ? "pause.fill" : "play.fill")
@@ -724,6 +740,7 @@ private struct MixTrackRow: View {
 /// lane to change where the next song comes in; both snap to beats.
 private struct MixTimeline: View {
     @EnvironmentObject private var player: MusicPlayer
+    @ObservedObject var preview: TransitionPreview
     let outgoing: TrackAnalysis
     let incoming: TrackAnalysis
     let plan: TransitionPlan
@@ -731,23 +748,34 @@ private struct MixTimeline: View {
     @Binding var held: Bool
     let onMoveStart: (Double) -> Void
     let onMoveEntry: (Double) -> Void
+    /// Plays the preview from a position relative to the blend's start.
+    let onPreview: (Double) -> Void
+
+    // Everything is drawn relative to the start of the blend, which stays
+    // put on screen. Each song is a strip that slides under it on its own:
+    // moving the top song never moves the bottom one, and the reverse.
 
     @State private var drag: DragState?
     /// The finger is going up or down: that's the page scrolling, not us.
     @State private var scrolling = false
+    /// A strip still sliding after you let go of it.
+    @State private var glide: Task<Void, Never>?
     @GestureState private var touching = false
     @GestureState private var seekTouching = false
+    @State private var seeking: Double?
+
+    private enum Lane { case outgoing, incoming }
 
     private struct DragState {
         var lane: Lane
         var window: ClosedRange<Double>
         var origin: Double
-        /// Where the dragged point is now. Drawn straight away and saved
-        /// once on release, so the drag isn't slowed by re-planning the mix.
+        /// Where the moved song is now. Drawn straight away and saved once
+        /// it stops, so moving isn't slowed by re-planning the mix.
         var value: Double?
     }
 
-    /// The plan with the in-progress drag applied.
+    /// The plan with the strip being moved applied.
     private var shown: TransitionPlan {
         var p = plan
         if let drag, let value = drag.value {
@@ -759,45 +787,69 @@ private struct MixTimeline: View {
         return p
     }
 
-    @State private var seeking: Double?
+    private var inRate: Double { Double(max(0.25, plan.inRate)) }
 
-    private enum Lane { case outgoing, incoming }
-
+    /// The span shown, in seconds from the blend's start. It only changes
+    /// when nothing is moving, so strips slide against a still frame.
     private var window: ClosedRange<Double> {
         if let drag { return drag.window }
-        let pad = max(plan.length * 0.3, plan.beat * 4)
-        // Keep a next song that was pushed later in view.
-        let inStart = plan.mixStart - min(0, plan.entry) / Double(max(0.25, plan.inRate))
-        return (plan.mixStart - pad)...(max(plan.mixEnd, inStart + plan.beat * 4) + pad)
+        let pad = max(plan.length * 0.3, plan.beat * 4, 2)
+        let inStarts = max(0, -plan.entry / inRate)
+        return -pad...(max(plan.length, inStarts + plan.beat * 4) + pad)
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
+            // The times sit outside the waveforms, as plain text.
+            HStack {
+                Text("Out  \(Self.stamp(shown.mixStart))")
+                Spacer()
+            }
+            .font(.caption.monospacedDigit().weight(.medium))
+            .foregroundStyle(MixColor.volume.opacity(0.9))
+
             GeometryReader { proxy in
                 let size = proxy.size
-                TimelineView(.animation(paused: !player.isPlaying)) { context in
+                TimelineView(.animation(paused: !player.isPlaying && !preview.isPlaying)) { context in
                     Canvas { canvas, _ in
                         draw(in: &canvas, size: size, playhead: seeking ?? playhead(at: context.date))
                     }
                 }
                 .contentShape(Rectangle())
-                // Alongside the page's scrolling, not instead of it: a
-                // sideways drag always moves the waveform (and holds the page
-                // still), an up or down one scrolls.
+                // Alongside the page's scrolling: a sideways drag moves a
+                // song (and holds the page still), an up or down one scrolls.
                 .simultaneousGesture(dragGesture(size: size))
                 .overlay { nudges }
             }
-            .onDragCancelled(touching, stillBusy: { drag != nil || scrolling || held }) {
-                drag = nil
+            .onDragCancelled(touching, stillBusy: { (drag != nil && glide == nil) || scrolling || held }) {
+                if glide == nil { finish() }
                 scrolling = false
-                held = false
             }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            HStack(spacing: 10) {
+                Text("In  \(Self.stamp(shown.entry))")
+                    .foregroundStyle(MixColor.volume.opacity(0.9))
+                if shown.entry < -0.005 {
+                    // The next song was pushed later: say so, and offer to undo it.
+                    Text("waits \(String(format: "%.1f", -shown.entry / inRate)) s")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Remove Gap") { onMoveEntry(0) }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.brand)
+                } else {
+                    Spacer()
+                }
+            }
+            .font(.caption.monospacedDigit().weight(.medium))
+
             seekBar
         }
-        .accessibilityElement()
+        .onDisappear { glide?.cancel() }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Transition waveform, \(plan.bars) bars")
-        .accessibilityHint("Drag the top song to move the blend, the bottom song to change where it comes in.")
+        .accessibilityHint("Drag the top song or the bottom song to move it on its own.")
     }
 
     // MARK: Fine moves
@@ -809,29 +861,21 @@ private struct MixTimeline: View {
     /// the arrow points; hold an arrow to keep moving.
     private var nudges: some View {
         VStack(spacing: 0) {
-            nudgeRow(.outgoing, time: shown.mixStart, label: "Out")
-            nudgeRow(.incoming, time: shown.entry, label: "In")
+            nudgeRow(.outgoing)
+            nudgeRow(.incoming)
         }
         .padding(.vertical, 6)
         .opacity(drag == nil ? 1 : 0)
         .animation(.easeOut(duration: 0.15), value: drag == nil)
     }
 
-    private func nudgeRow(_ lane: Lane, time: Double, label: String) -> some View {
+    private func nudgeRow(_ lane: Lane) -> some View {
         HStack(spacing: 0) {
             arrow(lane, direction: -1)
             Spacer(minLength: 0)
             arrow(lane, direction: 1)
         }
         .frame(maxHeight: .infinity)
-        .overlay(alignment: lane == .outgoing ? .top : .bottom) {
-            Text("\(label) \(Self.stamp(time))")
-                .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(.black.opacity(0.45), in: Capsule())
-                .allowsHitTesting(false)
-        }
         .padding(.horizontal, 6)
     }
 
@@ -848,33 +892,39 @@ private struct MixTimeline: View {
         .buttonStyle(PressScaleStyle())
         .buttonRepeatBehavior(.enabled)
         .sensoryFeedback(.selection, trigger: lane == .outgoing ? plan.mixStart : plan.entry)
-        .accessibilityLabel("\(lane == .outgoing ? "First" : "Second") song \(direction < 0 ? "earlier" : "later") by 10 milliseconds")
+        .accessibilityLabel("\(lane == .outgoing ? "First" : "Second") song \(direction < 0 ? "left" : "right") by 10 milliseconds")
     }
 
-    /// Moves one song 10 ms. Moving a song right on screen means its part
-    /// of the blend comes from earlier in it.
+    /// Moving a song right on screen means its part of the blend comes from
+    /// earlier in it.
     private func nudge(_ lane: Lane, direction: Double) {
         switch lane {
-        case .outgoing:
-            onMoveStart(min(max(0, plan.mixStart - direction * Self.step), outgoing.duration + 30))
-        case .incoming:
-            let value = plan.entry - direction * Self.step * Double(plan.inRate)
-            onMoveEntry(min(max(-60, value), max(0, incoming.duration - 0.5)))
+        case .outgoing: onMoveStart(clamp(plan.mixStart - direction * Self.step, .outgoing))
+        case .incoming: onMoveEntry(clamp(plan.entry - direction * Self.step * inRate, .incoming))
+        }
+    }
+
+    private func clamp(_ value: Double, _ lane: Lane) -> Double {
+        switch lane {
+        case .outgoing: min(max(0, value), outgoing.duration + 30)
+        case .incoming: min(max(-60, value), max(0, incoming.duration - 0.5))
         }
     }
 
     /// 1:52.340
-    private static func stamp(_ seconds: Double) -> String {
-        let sign = seconds < 0 ? "−" : ""
+    static func stamp(_ seconds: Double) -> String {
+        let sign = seconds < -0.0005 ? "−" : ""
         let value = abs(seconds)
         let minutes = Int(value / 60)
         return sign + String(format: "%d:%06.3f", minutes, value - Double(minutes) * 60)
     }
 
-    /// Drag along this bar to move playback through the transition.
+    // MARK: Listening
+
+    /// Drag along this bar to hear the transition from that point.
     private var seekBar: some View {
         GeometryReader { proxy in
-            TimelineView(.periodic(from: .now, by: 0.25)) { context in
+            TimelineView(.periodic(from: .now, by: 0.1)) { context in
                 let span = window.upperBound - window.lowerBound
                 let head = seeking ?? playhead(at: context.date)
                 let fraction = head.map { min(max(($0 - window.lowerBound) / max(span, 0.001), 0), 1) }
@@ -895,49 +945,34 @@ private struct MixTimeline: View {
                 DragGesture(minimumDistance: 0)
                     .updating($seekTouching) { _, state, _ in state = true }
                     .onChanged { value in
-                        guard isPlayingPair else { return }
                         let span = window.upperBound - window.lowerBound
                         let fraction = min(max(value.location.x / max(proxy.size.width, 1), 0), 1)
                         seeking = window.lowerBound + fraction * span
                     }
                     .onEnded { _ in
-                        if let seeking { seek(toOutgoingTime: seeking) }
+                        if let seeking { onPreview(seeking) }
                         seeking = nil
                     }
             )
         }
         .frame(height: 28)
         .onDragCancelled(seekTouching, stillBusy: { seeking != nil }) { seeking = nil }
-        .opacity(isPlayingPair ? 1 : 0.35)
         .animation(.snappy(duration: 0.15), value: seeking == nil)
-        .accessibilityLabel("Playback position in the transition")
+        .accessibilityLabel("Preview position in the transition")
     }
 
-    private var isPlayingPair: Bool { player.current == pair.from || player.current == pair.to }
-
-    private func seek(toOutgoingTime time: Double) {
-        if player.current == pair.from, outgoing.duration > 0 {
-            player.seek(to: min(max(time / outgoing.duration, 0), 1))
-        } else if player.current == pair.to, incoming.duration > 0 {
-            player.seek(to: min(max(incomingTime(time) / incoming.duration, 0), 1))
-        }
-    }
-
-    /// Where playback is, in the outgoing song's time, if this pair is playing.
+    /// Where the sound is, in seconds from the blend's start: the preview
+    /// first, else the real player if it is playing this pair.
     private func playhead(at date: Date) -> Double? {
+        if let position = preview.position(at: date) { return position }
         let plan = shown
         let elapsed = player.clock.elapsed(at: date)
-        if player.current == pair.from { return elapsed }
-        if player.current == pair.to, plan.inRate > 0 {
-            return plan.mixStart + (elapsed - plan.entry) / Double(plan.inRate)
-        }
+        if player.current == pair.from { return elapsed - plan.mixStart }
+        if player.current == pair.to { return (elapsed - plan.entry) / inRate }
         return nil
     }
 
-    private func incomingTime(_ outTime: Double) -> Double {
-        let plan = shown
-        return plan.entry + (outTime - plan.mixStart) * Double(plan.inRate)
-    }
+    // MARK: Drawing
 
     private func draw(in canvas: inout GraphicsContext, size: CGSize, playhead: Double?) {
         let plan = shown
@@ -948,34 +983,38 @@ private struct MixTimeline: View {
         let laneHeight = size.height * 0.42
         let topLane = CGRect(x: 0, y: size.height * 0.05, width: size.width, height: laneHeight)
         let bottomLane = CGRect(x: 0, y: size.height * 0.53, width: size.width, height: laneHeight)
-        let regionStart = x(plan.mixStart), regionEnd = x(plan.mixEnd)
+        let regionStart = x(0), regionEnd = x(plan.length)
 
         canvas.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.13)))
         let region = CGRect(x: regionStart, y: 0, width: max(2, regionEnd - regionStart), height: size.height)
         canvas.fill(Path(roundedRect: region, cornerRadius: 10), with: .color(Color(white: 0.24)))
 
-        // Bar lines on the outgoing grid.
-        if let first = outgoing.firstBeat, let beat = outgoing.beatLength {
+        // Bar lines on each song's own grid, so they slide with it.
+        func bars(_ analysis: TrackAnalysis, lane: CGRect, toSong: (Double) -> Double, toScreen: (Double) -> Double) {
+            guard let first = analysis.firstBeat, let beat = analysis.beatLength else { return }
             let bar = beat * 4
-            var line = first + ((window.lowerBound - first) / bar).rounded(.up) * bar
-            while line < window.upperBound {
-                canvas.fill(Path(CGRect(x: x(line), y: 0, width: 1, height: size.height)),
-                            with: .color(.white.opacity(0.06)))
+            let from = toSong(window.lowerBound), to = toSong(window.upperBound)
+            var line = first + ((from - first) / bar).rounded(.up) * bar
+            while line < to {
+                canvas.fill(Path(CGRect(x: x(toScreen(line)), y: lane.minY, width: 1, height: lane.height)),
+                            with: .color(.white.opacity(0.07)))
                 line += bar
             }
         }
+        bars(outgoing, lane: topLane, toSong: { plan.mixStart + $0 }, toScreen: { $0 - plan.mixStart })
+        bars(incoming, lane: bottomLane, toSong: { plan.entry + $0 * inRate }, toScreen: { ($0 - plan.entry) / inRate })
 
         // Waveforms, brighter inside the blend.
         let columns = Int(size.width / 3)
         for column in 0..<columns {
             let px = CGFloat(column) * 3
-            let time = start + Double(px / size.width) * span
-            let inside = time >= plan.mixStart && time <= plan.mixEnd
-            let outPeak = time <= outgoing.duration ? outgoing.peak(at: time) : 0
-            let inTime = incomingTime(time)
+            let r = start + Double(px / size.width) * span
+            let inside = r >= 0 && r <= plan.length
+            let outTime = plan.mixStart + r
+            let outPeak = outTime >= 0 && outTime <= outgoing.duration ? outgoing.peak(at: outTime) : 0
+            let inTime = plan.entry + r * inRate
             let inPeak = inTime >= 0 && inTime <= incoming.duration ? incoming.peak(at: inTime) : 0
-            for (peak, lane, playing) in [(outPeak, topLane, time <= plan.mixEnd),
-                                          (inPeak, bottomLane, time >= plan.mixStart)] where peak > 0 {
+            for (peak, lane, playing) in [(outPeak, topLane, r <= plan.length), (inPeak, bottomLane, r >= 0)] where peak > 0 {
                 let height: CGFloat = max(1.5, CGFloat(peak.squareRoot()) * lane.height)
                 let bar = CGRect(x: px, y: lane.midY - height / 2, width: 2, height: height)
                 let opacity: Double = inside ? 0.85 : (playing ? 0.55 : 0.18)
@@ -1026,54 +1065,93 @@ private struct MixTimeline: View {
         }
     }
 
+    // MARK: Moving a song
+
+    /// Seconds of the song per point of finger travel.
+    private func secondsPerPoint(_ lane: Lane, width: CGFloat, window: ClosedRange<Double>) -> Double {
+        let span = window.upperBound - window.lowerBound
+        return span / Double(max(width, 1)) * (lane == .outgoing ? 1 : inRate)
+    }
+
+    /// Clicks onto a beat only when it passes close to one, and onto the
+    /// song's very start for the bottom strip, so a gap is easy to undo.
+    private func magnet(_ raw: Double, _ lane: Lane) -> Double {
+        if lane == .incoming, abs(raw) < 0.12 { return 0 }
+        let analysis = lane == .outgoing ? outgoing : incoming
+        let beat = analysis.snapToBeat(raw)
+        return abs(beat - raw) < 0.06 ? beat : raw
+    }
+
     private func dragGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .updating($touching) { _, state, _ in state = true }
             .onChanged { value in
-                if drag == nil {
+                if drag == nil || glide != nil {
                     guard !scrolling else { return }
-                    if abs(value.translation.height) > abs(value.translation.width) {
+                    if drag == nil, abs(value.translation.height) > abs(value.translation.width) {
                         scrolling = true
                         return
                     }
-                    held = true
                     let lane: Lane = value.startLocation.y < size.height / 2 ? .outgoing : .incoming
-                    drag = DragState(lane: lane, window: window,
-                                     origin: lane == .outgoing ? plan.mixStart : plan.entry)
+                    // Catching a strip that is still sliding: stop it where it is.
+                    if glide != nil {
+                        glide?.cancel()
+                        glide = nil
+                        if let current = drag, current.lane != lane { finish() }
+                    }
+                    held = true
+                    let still = drag.flatMap { $0.lane == lane ? $0.value : nil }
+                    drag = DragState(lane: lane, window: drag?.window ?? window,
+                                     origin: (still ?? (lane == .outgoing ? plan.mixStart : plan.entry))
+                                        + Double(value.translation.width) * secondsPerPoint(lane, width: size.width, window: drag?.window ?? window))
                 }
                 guard let current = drag else { return }
-                let span = current.window.upperBound - current.window.lowerBound
-                let seconds = Double(value.translation.width / size.width) * span
-                // Each song moves on its own and follows the finger freely;
-                // it only clicks onto a beat when it passes close to one.
-                func magnet(_ raw: Double, _ analysis: TrackAnalysis) -> Double {
-                    let beat = analysis.snapToBeat(raw)
-                    return abs(beat - raw) < 0.06 ? beat : raw
-                }
-                switch current.lane {
-                case .outgoing:
-                    // Moving the outgoing song left starts the blend later in
-                    // it, all the way to its end and past it (a gap).
-                    let target = magnet(current.origin - seconds, outgoing)
-                    drag?.value = min(max(0, target), outgoing.duration + 30)
-                case .incoming:
-                    // The next song can be pushed later than the blend's start
-                    // (it waits) or started from deep inside it.
-                    let target = magnet(current.origin - seconds * Double(plan.inRate), incoming)
-                    drag?.value = min(max(-60, target), max(0, incoming.duration - 0.5))
-                }
+                let seconds = Double(value.translation.width) * secondsPerPoint(current.lane, width: size.width, window: current.window)
+                // Follows the finger exactly; dragging right pulls earlier music under the blend.
+                drag?.value = magnet(clamp(current.origin - seconds, current.lane), current.lane)
             }
-            .onEnded { _ in
-                if let current = drag, let value = current.value {
-                    switch current.lane {
-                    case .outgoing: if abs(value - plan.mixStart) > 0.001 { onMoveStart(value) }
-                    case .incoming: if abs(value - plan.entry) > 0.001 { onMoveEntry(value) }
-                    }
-                }
-                drag = nil
+            .onEnded { value in
                 scrolling = false
-                held = false
+                guard let current = drag, glide == nil else { return }
+                // Keeps the speed it was let go with, then slows to a stop,
+                // like a carousel.
+                let perPoint = secondsPerPoint(current.lane, width: size.width, window: current.window)
+                var speed = -Double(value.velocity.width) * perPoint
+                guard abs(speed) > 0.3 else { return finish() }
+                glide = Task { @MainActor in
+                    var last = Date()
+                    while !Task.isCancelled, abs(speed) > 0.05 {
+                        try? await Task.sleep(for: .milliseconds(8))
+                        let now = Date()
+                        let dt = now.timeIntervalSince(last)
+                        last = now
+                        let value = drag?.value ?? current.origin
+                        let wanted = value + speed * dt
+                        let next = clamp(wanted, current.lane)
+                        drag?.value = next
+                        // Hit the end of the song: stop there.
+                        if next != wanted { break }
+                        // UIScrollView's normal deceleration.
+                        speed *= pow(0.998, dt * 1000)
+                    }
+                    guard !Task.isCancelled else { return }
+                    if let value = drag?.value { drag?.value = magnet(value, current.lane) }
+                    glide = nil
+                    finish()
+                }
             }
+    }
+
+    /// Saves where the moved song ended up.
+    private func finish() {
+        if let current = drag, let value = current.value {
+            switch current.lane {
+            case .outgoing: if abs(value - plan.mixStart) > 0.0005 { onMoveStart(value) }
+            case .incoming: if abs(value - plan.entry) > 0.0005 { onMoveEntry(value) }
+            }
+        }
+        drag = nil
+        held = false
     }
 }
 

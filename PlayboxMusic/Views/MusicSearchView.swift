@@ -13,11 +13,16 @@ struct MusicSearchView: View {
     @State private var submitted = ""
     @State private var albums: [ITunesItem] = []
     @State private var songs: [ITunesItem] = []
+    /// The artist the words name, shown first like Spotify's top result.
+    @State private var topArtist: ITunesItem?
     @State private var catalogLoading = false
     /// Set when a typo was fixed: what the results are really for.
     @State private var correction: String?
     @AppStorage("music.recentSearches") private var recentStore = ""
     @ObservedObject private var addOns = AddOnStore.shared
+    @ObservedObject private var sources = SourceAddOnStore.shared
+
+    private var hasMore: Bool { addOns.isOn(.internetArchive) || !sources.enabled.isEmpty }
 
     private var recentSearches: [String] {
         recentStore.split(separator: "\n").map(String.init)
@@ -31,8 +36,8 @@ struct MusicSearchView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case catalog = "Catalog"
         case soulseek = "Soulseek"
-        /// Only when the Internet Archive add-on is on.
-        case archive = "Archive"
+        /// Internet Archive and your source add-ons, when any is on.
+        case archive = "More"
         var id: String { rawValue }
     }
 
@@ -94,7 +99,7 @@ struct MusicSearchView: View {
         List {
             Section {
                 Picker("Search", selection: $mode) {
-                    ForEach(Mode.allCases.filter { $0 != .archive || addOns.isOn(.internetArchive) }) {
+                    ForEach(Mode.allCases.filter { $0 != .archive || hasMore }) {
                         Text($0.rawValue).tag($0)
                     }
                 }
@@ -121,12 +126,13 @@ struct MusicSearchView: View {
                 }
             }
             if mode == .archive {
-                ArchiveResultsSection(query: query)
+                if addOns.isOn(.internetArchive) { ArchiveResultsSection(query: query) }
+                ForEach(sources.enabled) { SourceResultsSection(manifest: $0, query: query) }
             } else if mode == .catalog {
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     CatalogHomeView(recentSearches: recentSearches) { term in query = term }
                 } else {
-                    CatalogResultsView(albums: albums, songs: songs)
+                    CatalogResultsView(artist: topArtist, albums: albums, songs: songs)
                 }
             } else {
                 Section {
@@ -192,26 +198,27 @@ struct MusicSearchView: View {
             quality = nil
             correction = nil
         }
+        // Pressing Search asks the catalogue and Soulseek together, whichever
+        // tab you're on, so switching tabs shows results at once and GET
+        // finds the songs it already heard about.
         .onSubmit(of: .search) {
-            if mode == .soulseek {
-                let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                submitted = term
-                correction = nil
-                Task {
-                    await client.search(term)
-                    // Soulseek only matches exact words. If nothing comes
-                    // back, the spelling is fixed and it is asked once more.
-                    try? await Task.sleep(for: .seconds(6))
-                    guard submitted == term, mode == .soulseek, client.results.isEmpty else { return }
-                    let hits = await SearchHelper.popular(term)
-                    guard submitted == term, client.results.isEmpty,
-                          let fixed = SearchHelper.corrected(term, from: hits) else { return }
-                    submitted = fixed
-                    correction = fixed
-                    await client.search(fixed)
-                }
-            } else {
-                remember(query)
+            let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else { return }
+            if mode != .soulseek { remember(term) }
+            submitted = term
+            if mode == .soulseek { correction = nil }
+            Task {
+                await client.search(term)
+                // Soulseek only matches exact words. If nothing comes back,
+                // the spelling is fixed and it is asked once more.
+                try? await Task.sleep(for: .seconds(6))
+                guard submitted == term, client.results.isEmpty else { return }
+                let hits = await SearchHelper.popular(term)
+                guard submitted == term, client.results.isEmpty,
+                      let fixed = SearchHelper.corrected(term, from: hits) else { return }
+                submitted = fixed
+                if mode == .soulseek { correction = fixed }
+                await client.search(fixed)
             }
         }
         // The catalog is fast, so it searches as you type.
@@ -222,6 +229,7 @@ struct MusicSearchView: View {
             guard term.count >= 2 else {
                 albums = []
                 songs = []
+                topArtist = nil
                 return
             }
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
@@ -247,6 +255,14 @@ struct MusicSearchView: View {
                     correction = fixed
                 }
             }
+            let artists = (try? await ITunesCatalog.search(correction ?? term, entity: "musicArtist", limit: 8)) ?? []
+            guard !Task.isCancelled else { return }
+            topArtist = SearchHelper.topArtist(correction ?? term, artists: artists, hits: hits)
+            // The named artist's albums first, then the rest.
+            if let name = topArtist?.artistName {
+                let theirs = newAlbums.filter { SearchHelper.fold($0.artistName ?? "") == SearchHelper.fold(name) }
+                newAlbums = theirs + newAlbums.filter { SearchHelper.fold($0.artistName ?? "") != SearchHelper.fold(name) }
+            }
             albums = newAlbums
             // Most played first, like Spotify.
             songs = SearchHelper.byPopularity(newSongs, hits: hits)
@@ -257,7 +273,7 @@ struct MusicSearchView: View {
         }
         .navigationDestination(for: InternetArchive.Item.self) { ArchiveItemView(item: $0) }
         // Turning the Archive add-on off while on its tab goes back to the catalogue.
-        .onChange(of: addOns.isOn(.internetArchive)) { _, on in
+        .onChange(of: hasMore) { _, on in
             if !on, mode == .archive { mode = .catalog }
         }
         .navigationDestination(for: ITunesItem.self) { item in

@@ -339,17 +339,40 @@ final class SoulseekClient: ObservableObject {
     /// searches at a time), so the catalog only offers what can be fetched.
     func checkSong(key: String, artist: String?, title: String, durationSeconds: Int?) async {
         guard shouldCheck(key) else { return }
-        availability[key] = .checking
+        let name = MusicText.clean(title)
+        let by = artist.map(MusicText.clean)
+        // The song's own words must be in the file's name; the artist may be
+        // in the folders above it.
+        func matches(_ results: [SlskSearchResult], needArtist: Bool) -> [SlskSearchResult] {
+            Self.rankedSongs(in: results, durationSeconds: durationSeconds).filter { file in
+                SlskMatch.containsAll(name, in: file.title, exact: false)
+                    && (!needArtist || by == nil || SlskMatch.containsAll(by!, in: file.filename, exact: false))
+            }
+        }
+        func publish(_ ranked: [SlskSearchResult]) {
+            let grouped = Dictionary(grouping: ranked, by: SlskQuality.of)
+            songSources[key] = grouped
+            checkedAt[key] = Date()
+            availability[key] = grouped.isEmpty ? .unavailable : .available(grouped.keys.sorted())
+        }
+
+        // Seen in a recent search (yours, an artist page, an album): show it now.
+        let known = matches(pool, needArtist: true)
+        if known.isEmpty { availability[key] = .checking } else { publish(known) }
+
         await acquireProbe()
         defer { releaseProbe() }
-        let query = MusicText.clean([artist, title].compactMap { $0 }.joined(separator: " "))
-        let results = await gather(query: query)
-        let ranked = Self.rankedSongs(in: results, durationSeconds: durationSeconds)
-            .filter { SlskMatch.containsAll(MusicText.clean(title), in: $0.filename) }
-        let grouped = Dictionary(grouping: ranked, by: SlskQuality.of)
-        songSources[key] = grouped
-        checkedAt[key] = Date()
-        availability[key] = grouped.isEmpty ? .unavailable : .available(grouped.keys.sorted())
+        let query = Self.queryWords([artist, title].compactMap { $0 }.joined(separator: " "))
+        var found = await gather(query: query, seconds: 9) { matches($0, needArtist: true).count >= 8 }
+        var ranked = matches(found + pool, needArtist: true)
+        if ranked.isEmpty {
+            // Shared under the title only, or with a differently spelled artist.
+            found = await gather(query: Self.queryWords(title), seconds: 7) { matches($0, needArtist: false).count >= 8 }
+            let titled = matches(found, needArtist: false)
+            ranked = titled.filter { by == nil || SlskMatch.containsAll(by!, in: $0.filename, exact: false) }
+            if ranked.isEmpty { ranked = titled }
+        }
+        publish(ranked)
     }
 
     func checkAlbum(key: String, artist: String?, album: String, trackCount: Int?) async {
@@ -357,8 +380,8 @@ final class SoulseekClient: ObservableObject {
         availability[key] = .checking
         await acquireProbe()
         defer { releaseProbe() }
-        let query = MusicText.clean([artist, Self.albumCore(album)].compactMap { $0 }.joined(separator: " "))
-        let results = await gather(query: query, seconds: 7)
+        let query = Self.queryWords([artist, Self.albumCore(album)].compactMap { $0 }.joined(separator: " "))
+        let results = await gather(query: query, seconds: 8)
         let folders = Self.rankedFolders(in: results, trackCount: trackCount)
             .filter { files in
                 let path = files[0].filename.split(whereSeparator: { $0 == "\\" || $0 == "/" }).dropLast().joined(separator: " ")
@@ -473,7 +496,10 @@ final class SoulseekClient: ObservableObject {
     private func shouldCheck(_ key: String) -> Bool {
         guard isConnected else { return false }
         if availability[key] == .checking { return false }
-        if let at = checkedAt[key], Date().timeIntervalSince(at) < 20 * 60 { return false }
+        // Found sources are trusted for 20 minutes; "not shared" is asked again
+        // every time, since sharers come and go.
+        if let at = checkedAt[key], Date().timeIntervalSince(at) < 20 * 60,
+           case .available = availability[key] { return false }
         return true
     }
 
@@ -489,14 +515,65 @@ final class SoulseekClient: ObservableObject {
         if probeWaiters.isEmpty { probeSlots += 1 } else { probeWaiters.removeFirst().resume() }
     }
 
-    /// One background search, without touching the visible results.
-    private func gather(query: String, seconds: Double = 5) async -> [SlskSearchResult] {
+    /// One background search, without touching the visible results. Stops
+    /// early once `enough` is happy (after a short minimum wait). It is not
+    /// stopped by a closed sheet: an answer cut short would be remembered as
+    /// "not shared".
+    private func gather(query: String, seconds: Double = 5,
+                        enough: (([SlskSearchResult]) -> Bool)? = nil) async -> [SlskSearchResult] {
         guard let server, !query.isEmpty else { return [] }
         let token = UInt32.random(in: 1...UInt32.max)
         collectors[token] = []
         try? await server.send(SlskWriter.message(code: 26) { $0.u32(token); $0.string(query) })
-        try? await Task.sleep(for: .seconds(seconds))
+        let started = Date()
+        while Date().timeIntervalSince(started) < seconds {
+            await Self.pause(0.3)
+            if let enough, Date().timeIntervalSince(started) > 2.5, enough(collectors[token] ?? []) { break }
+        }
         return collectors.removeValue(forKey: token) ?? []
+    }
+
+    /// A wait that isn't cut short when the screen that asked goes away.
+    private static func pause(_ seconds: Double) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { done.resume() }
+        }
+    }
+
+    // MARK: Recent answers
+
+    /// Audio files heard in recent searches (newest last), so a GET for a
+    /// song that a search already turned up answers instantly.
+    private var pool: [SlskSearchResult] = []
+    private var poolIDs = Set<String>()
+    private var prefetched: [String: Date] = [:]
+
+    private func remember(_ files: [SlskSearchResult]) {
+        for file in files where poolIDs.insert(file.id).inserted { pool.append(file) }
+        if pool.count > 8000 {
+            pool.removeFirst(pool.count - 6000)
+            poolIDs = Set(pool.map(\.id))
+        }
+    }
+
+    /// Searches quietly so an artist's or album's songs are ready before
+    /// you tap GET. Each query once every 20 minutes at most.
+    func prefetch(_ query: String) {
+        let words = Self.queryWords(query)
+        guard isConnected, !words.isEmpty else { return }
+        if let at = prefetched[words], Date().timeIntervalSince(at) < 20 * 60 { return }
+        prefetched[words] = Date()
+        Task { _ = await gather(query: words, seconds: 8) }
+    }
+
+    /// Words to send to Soulseek: no brackets, no apostrophes, no single
+    /// letters ("Don't" → "Don"), which its word matching trips on.
+    static func queryWords(_ text: String) -> String {
+        MusicText.clean(text)
+            .replacingOccurrences(of: "'", with: " ")
+            .split(separator: " ")
+            .filter { $0.count > 1 }
+            .joined(separator: " ")
     }
 
     // MARK: Catalog fetches
@@ -607,7 +684,7 @@ final class SoulseekClient: ObservableObject {
             .filter(\.isAudio)
             .filter { result in
                 guard let expected = durationSeconds, let actual = result.duration, actual > 0 else { return true }
-                return abs(Int(actual) - expected) <= 6
+                return abs(Int(actual) - expected) <= 10
             }
             .sorted { score($0) > score($1) }
             .filter { seenUsers.insert($0.username).inserted }
@@ -1098,6 +1175,9 @@ final class SoulseekClient: ObservableObject {
                 queueLength: queue
             )
         }
+        // Every audio answer, from any search, is kept for a while so GET can
+        // offer sources at once for songs that were already seen.
+        remember(parsed.filter(\.isAudio))
         if collecting {
             collectors[token]?.append(contentsOf: parsed.prefix(3000))
         } else {

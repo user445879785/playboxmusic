@@ -1,0 +1,18 @@
+{
+  "playbox": 1,
+  "id": "audius",
+  "name": "Audius",
+  "about": "Free streaming platform where artists upload their own music. Millions of tracks, free to stream and, when the artist allows it, to download.",
+  "homepage": "https://audius.co",
+  "icon": "waveform.circle.fill",
+  "search": {
+    "url": "https://api.audius.co/v1/tracks/search?query={query}&app_name=PlayboxMusic",
+    "results": "data",
+    "title": "title",
+    "artist": "user.name",
+    "artwork": "artwork.480x480",
+    "audio": "https://api.audius.co/v1/tracks/{id}/stream?app_name=PlayboxMusic",
+    "duration": "duration",
+    "format": "MP3"
+  }
+}

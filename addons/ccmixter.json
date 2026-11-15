@@ -1,0 +1,16 @@
+{
+  "playbox": 1,
+  "id": "ccmixter",
+  "name": "ccMixter",
+  "about": "Community remixes, a cappellas and instrumentals under Creative Commons licences.",
+  "homepage": "https://ccmixter.org",
+  "icon": "slider.horizontal.3",
+  "search": {
+    "url": "https://ccmixter.org/api/query?f=json&search={query}&limit=40",
+    "results": "",
+    "title": "upload_name",
+    "artist": "user_real_name",
+    "audio": "files.0.download_url",
+    "format": "MP3"
+  }
+}

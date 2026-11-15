@@ -170,6 +170,129 @@ private final class AudioDeck {
     }
 }
 
+/// Volume, bass EQ and effects for a blend at progress t (0…1). Shared by
+/// the player and the editor's preview, so the preview sounds the same.
+@MainActor
+private func applyMixAutomation(_ plan: TransitionPlan, at t: Double, outgoing: AudioDeck, incoming: AudioDeck) {
+    let gains = plan.volume.gains(t)
+    let amount = plan.effect.amount(t)
+    if plan.effect == .echo {
+        // Cut the dry signal but keep the echoes ringing, then fade them.
+        outgoing.player.volume = gains.out
+        outgoing.fader.outputVolume = Float(1 - smoothstep(0.75, 1, t))
+        outgoing.setEcho(amount, beat: plan.beat)
+    } else {
+        outgoing.fader.outputVolume = gains.out
+    }
+    incoming.fader.outputVolume = gains.in
+    let bass = plan.eq.bass(t, beatFraction: plan.length > 0 ? plan.beat / plan.length : 0.1)
+    outgoing.setBass(bass.out)
+    incoming.setBass(bass.in)
+    switch plan.effect {
+    case .lowPass:
+        // Opens from 250 Hz to the full range: the incoming song rises in.
+        incoming.setLowPass(Float(250 * pow(80, 1 - amount)))
+    case .highPass:
+        outgoing.setHighPass(Float(20 * pow(100, amount)))
+    case .echo, .none:
+        break
+    }
+}
+
+/// Plays one transition on its own small engine, so the editor's play
+/// button never moves the real player: leave the editor and the song you
+/// were listening to is exactly where it was.
+@MainActor
+final class TransitionPreview: ObservableObject {
+    @Published private(set) var isPlaying = false
+    private let engine = AVAudioEngine()
+    private let outDeck = AudioDeck()
+    private let inDeck = AudioDeck()
+    private var plan: TransitionPlan?
+    /// When the blend starts (position 0), on the wall clock.
+    private var zero: Date?
+    private var end: Double = 0
+    private var ticker: Task<Void, Never>?
+
+    /// How long before the blend the play button starts.
+    static let lead = 6.0
+
+    init() {
+        outDeck.attach(to: engine, output: engine.mainMixerNode)
+        inDeck.attach(to: engine, output: engine.mainMixerNode)
+    }
+
+    /// Seconds from the start of the blend, while playing.
+    func position(at date: Date) -> Double? {
+        guard isPlaying, let zero else { return nil }
+        return date.timeIntervalSince(zero)
+    }
+
+    /// Plays the two songs as the mix would, from `position` seconds
+    /// relative to the start of the blend (negative is before it).
+    func play(_ plan: TransitionPlan, from: Track, to: Track, at position: Double) {
+        stop()
+        do {
+            try outDeck.load(from.url, engine: engine)
+            try inDeck.load(to.url, engine: engine)
+            if !engine.isRunning {
+                engine.prepare()
+                try engine.start()
+            }
+        } catch {
+            return
+        }
+        self.plan = plan
+        let rate = Double(max(0.25, plan.inRate))
+        outDeck.trim.globalGain = plan.outGain
+        inDeck.trim.globalGain = plan.inGain
+        inDeck.timePitch.rate = plan.inRate
+        applyMixAutomation(plan, at: 0, outgoing: outDeck, incoming: inDeck)
+
+        // Both songs start on the same tick of the audio clock.
+        let delay = 0.08
+        let now = mach_absolute_time()
+        func at(_ seconds: Double) -> AVAudioTime {
+            AVAudioTime(hostTime: now + AVAudioTime.hostTime(forSeconds: delay + max(0, seconds)))
+        }
+        let outFrom = plan.mixStart + position
+        if outFrom < outDeck.duration {
+            outDeck.play(from: max(0, outFrom), at: at(max(0, -outFrom))) {}
+        }
+        // Where the next song is at `position`; below zero it waits.
+        let inFrom = plan.entry + position * rate
+        inDeck.play(from: max(0, inFrom), at: at(max(0, -inFrom) / rate)) {}
+
+        zero = Date().addingTimeInterval(delay - position)
+        let inStarts = -min(0, plan.entry) / rate
+        end = max(plan.length, inStarts) + Self.lead
+        isPlaying = true
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(16))
+                self?.tick()
+            }
+        }
+    }
+
+    private func tick() {
+        guard let plan, let position = position(at: Date()) else { return }
+        let t = plan.length > 0 ? position / plan.length : (position >= 0 ? 1 : 0)
+        applyMixAutomation(plan, at: min(max(t, 0), 1), outgoing: outDeck, incoming: inDeck)
+        if position >= end { stop() }
+    }
+
+    func stop() {
+        ticker?.cancel()
+        ticker = nil
+        outDeck.unload()
+        inDeck.unload()
+        engine.stop()
+        zero = nil
+        if isPlaying { isPlaying = false }
+    }
+}
+
 /// Playback time lives in its own object so only the views that show it
 /// (scrubber, times, lyrics) redraw as it advances.
 @MainActor
@@ -871,30 +994,7 @@ final class MusicPlayer: ObservableObject {
 
     /// Sets volume, bass EQ and effects for both decks at progress t.
     private func applyAutomation(_ plan: TransitionPlan, at t: Double) {
-        let outgoing = deck, incoming = otherDeck
-        let gains = plan.volume.gains(t)
-        let amount = plan.effect.amount(t)
-        if plan.effect == .echo {
-            // Cut the dry signal but keep the echoes ringing, then fade them.
-            outgoing.player.volume = gains.out
-            outgoing.fader.outputVolume = Float(1 - smoothstep(0.75, 1, t))
-            outgoing.setEcho(amount, beat: plan.beat)
-        } else {
-            outgoing.fader.outputVolume = gains.out
-        }
-        incoming.fader.outputVolume = gains.in
-        let bass = plan.eq.bass(t, beatFraction: plan.length > 0 ? plan.beat / plan.length : 0.1)
-        outgoing.setBass(bass.out)
-        incoming.setBass(bass.in)
-        switch plan.effect {
-        case .lowPass:
-            // Opens from 250 Hz to the full range: the incoming song rises in.
-            incoming.setLowPass(Float(250 * pow(80, 1 - amount)))
-        case .highPass:
-            outgoing.setHighPass(Float(20 * pow(100, amount)))
-        case .echo, .none:
-            break
-        }
+        applyMixAutomation(plan, at: t, outgoing: deck, incoming: otherDeck)
     }
 
     private func advanceMix(now: Date) {

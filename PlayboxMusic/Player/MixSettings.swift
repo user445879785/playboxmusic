@@ -294,6 +294,21 @@ final class MixSettings: ObservableObject {
         return bars
     }
 
+    /// The name shown on a transition chip: the preset, or Custom once
+    /// you've changed volume, EQ or effects yourself.
+    func label(from: Track, to: Track) -> String {
+        let custom = transitionOverride(from: from, to: to)
+        if custom.volume != nil || custom.eq != nil || custom.effect != nil {
+            if let volume = custom.volume, let eq = custom.eq, let effect = custom.effect,
+               let preset = MixPreset.matching(volume, eq, effect) {
+                return preset.rawValue
+            }
+            return "Custom"
+        }
+        if custom.mixStart != nil || custom.entry != nil || custom.bars != nil { return "Custom" }
+        return (custom.preset ?? defaultPreset).rawValue
+    }
+
     func keysCompatible(_ out: TrackAnalysis?, _ incoming: TrackAnalysis?) -> Bool {
         guard let a = out?.key, let b = incoming?.key else { return true }
         return a.isCompatible(with: b)

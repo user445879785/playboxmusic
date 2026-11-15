@@ -9,6 +9,7 @@ struct QualitySheet: View {
     }
 
     @EnvironmentObject private var client: SoulseekClient
+    @ObservedObject private var sources = SourceAddOnStore.shared
     @Environment(\.dismiss) private var dismiss
     let kind: Kind
     let key: String
@@ -43,7 +44,21 @@ struct QualitySheet: View {
                     }
                     .listRowBackground(Color.clear)
                 }
-                content
+                if client.isConnected {
+                    content
+                } else {
+                    Section("Soulseek") {
+                        Text("Sign in to Soulseek in Settings to see its sources.").foregroundStyle(.secondary)
+                    }
+                }
+                // Your source add-ons, searched for the same song.
+                if case .song(let song) = kind {
+                    ForEach(sources.enabled) { manifest in
+                        SourceResultsSection(manifest: manifest,
+                                             query: [song.artistName, song.trackName].compactMap { $0 }.joined(separator: " "),
+                                             meta: song.trackMeta(), limit: 5)
+                    }
+                }
             }
             .navigationTitle("Choose Quality")
             .navigationBarTitleDisplayMode(.inline)
@@ -56,7 +71,8 @@ struct QualitySheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationBackground(.regularMaterial)
-        .task { await check() }
+        // Not tied to the sheet: closing it early mustn't cut the search short.
+        .onAppear { Task { await check() } }
         .onChange(of: client.availability[key]) { _, state in
             if case .available(let qualities) = state, selected == nil { selected = qualities.first }
         }

@@ -82,6 +82,36 @@ struct LibraryEntryRow: View {
     }
 }
 
+/// The transition between two songs in a list, like Spotify's mixed
+/// playlists: tap it to open the editor. Nothing shows while mixing is off,
+/// so the next song simply follows.
+struct ListTransitionChip: View {
+    @ObservedObject var mix: MixSettings
+    let from: Track
+    let to: Track
+    let onTap: (TransitionPair) -> Void
+
+    var body: some View {
+        if mix.isOn {
+            TransitionChip(label: mix.label(from: from, to: to), progress: nil) {
+                onTap(TransitionPair(from: from, to: to))
+            }
+            .padding(.leading, 18)
+        }
+    }
+}
+
+extension View {
+    /// Puts the transition to the next song under a song row.
+    func mixChip(to next: Track?, from track: Track, mix: MixSettings,
+                    onTap: @escaping (TransitionPair) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            self
+            if let next { ListTransitionChip(mix: mix, from: track, to: next, onTap: onTap) }
+        }
+    }
+}
+
 /// The accent colour glowing down from the top of a list page.
 struct CollectionBackdrop: View {
     var body: some View {
@@ -151,12 +181,21 @@ struct CollectionSongRow<MenuItems: View>: View {
     @EnvironmentObject private var player: MusicPlayer
     let track: Track
     var detail: String?
+    var next: Track?
+    var onTransition: (TransitionPair) -> Void = { _ in }
     let onPlay: () -> Void
     @ViewBuilder let menu: () -> MenuItems
 
     var body: some View {
+        row.mixChip(to: next, from: track, mix: player.mix, onTap: onTransition)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 10))
+    }
+
+    private var row: some View {
         let playing = player.current == track
-        HStack(spacing: 12) {
+        return HStack(spacing: 12) {
             Button(action: onPlay) {
                 HStack(spacing: 12) {
                     ArtworkThumbnail(track: track, size: 52)
@@ -182,9 +221,6 @@ struct CollectionSongRow<MenuItems: View>: View {
             }
             .accessibilityLabel("More")
         }
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 10))
     }
 }
 
@@ -197,6 +233,7 @@ struct CollectionView: View {
     @State private var tracks: [Track] = []
     @State private var namingPlaylist = false
     @State private var newPlaylistTrack: Track?
+    @State private var editing: TransitionPair?
 
     private var title: String {
         switch collection {
@@ -213,7 +250,7 @@ struct CollectionView: View {
             CollectionHeader(title: title, tracks: tracks)
             ForEach(Array(tracks.enumerated()), id: \.element.id) { offset, track in
                 let starred = library.isFavourite(track)
-                CollectionSongRow(track: track) {
+                CollectionSongRow(track: track, next: tracks[safe: offset + 1], onTransition: { editing = $0 }) {
                     player.play(tracks, startAt: offset)
                 } menu: {
                     Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
@@ -240,6 +277,11 @@ struct CollectionView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .modifier(NewPlaylistAlert(isPresented: $namingPlaylist, track: newPlaylistTrack))
+        .sheet(item: $editing) { pair in
+            TransitionEditorView(pair: pair)
+                .environmentObject(player)
+                .environmentObject(library)
+        }
         // Worked out when the page opens (and when songs or stars change),
         // so the list doesn't reshuffle under your finger.
         .onAppear { tracks = library.tracks(in: collection) }

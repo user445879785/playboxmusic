@@ -1,0 +1,19 @@
+{
+  "playbox": 1,
+  "id": "openverse",
+  "name": "Openverse Audio",
+  "about": "WordPress's open search engine for Creative Commons and public domain audio from Jamendo, Freesound, Wikimedia and more.",
+  "homepage": "https://openverse.org",
+  "icon": "globe",
+  "search": {
+    "url": "https://api.openverse.org/v1/audio/?q={query}&page_size=40",
+    "results": "results",
+    "title": "title",
+    "artist": "creator",
+    "artwork": "thumbnail",
+    "audio": "url",
+    "duration": "duration",
+    "durationUnit": "ms",
+    "format": "filetype"
+  }
+}

@@ -39,6 +39,9 @@ struct MusicContentView: View {
         .overlay(alignment: .bottom) {
             DockLayer(selection: $tab, accent: Color(uiColor: UIColor(somaHex: appearance.accentHex)),
                       transparency: appearance.dockTransparency, scale: appearance.dockScale)
+                // Liquid Glass keeps the tint it was first drawn with; a new
+                // colour builds the dock again so it matches straight away.
+                .id(appearance.accentHex)
                 .frame(height: dockHeight)
                 .padding(.horizontal, 14)
                 .padding(.bottom, bottom)

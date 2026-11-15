@@ -110,7 +110,7 @@ struct GlassDock: View {
         if #available(iOS 26.0, *), !reduceTransparency {
             Capsule()
                 .fill(.clear)
-                .glassEffect(.regular.tint(accent.opacity(0.36)).interactive(), in: .capsule)
+                .glassEffect(.regular.tint(accent.opacity(0.55)).interactive(), in: .capsule)
         } else {
             fallbackPill
         }
@@ -138,7 +138,7 @@ struct GlassDock: View {
                 Capsule()
                     .fill(.clear)
                     // The whole dock takes a faint wash of the accent colour.
-                    .glassEffect((transparency > 0.75 ? Glass.clear : Glass.regular).tint(accent.opacity(0.14)),
+                    .glassEffect((transparency > 0.75 ? Glass.clear : Glass.regular).tint(accent.opacity(0.22)),
                                  in: .capsule)
             } else {
                 Capsule().fill(.ultraThinMaterial)

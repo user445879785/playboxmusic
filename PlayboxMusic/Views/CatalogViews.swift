@@ -142,10 +142,25 @@ struct GenreView: View {
 
 /// iTunes-catalog search results: albums as covers, songs as rows.
 struct CatalogResultsView: View {
+    var artist: ITunesItem?
     let albums: [ITunesItem]
     let songs: [ITunesItem]
 
     var body: some View {
+        if let artist, let id = artist.artistId, let name = artist.artistName {
+            Section("Top Result") {
+                NavigationLink(value: ITunesItem.artist(id: id, name: name)) {
+                    HStack(spacing: 14) {
+                        ArtistPicture(name: name, fallback: albums.first?.artworkURL(size: 300), size: 72)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(name).font(.title3.weight(.bold)).lineLimit(1)
+                            Text("Artist").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
         AlbumCarousel(title: "Albums", albums: albums)
         if !songs.isEmpty {
             Section("Songs") {
@@ -376,32 +391,102 @@ struct AlbumDetailView: View {
 }
 
 /// Artist page: top songs, albums and singles.
+/// A round artist photo, or a cover of theirs while there isn't one.
+struct ArtistPicture: View {
+    let name: String
+    var fallback: URL?
+    let size: CGFloat
+    @State private var picture: URL?
+    @State private var looked = false
+
+    var body: some View {
+        Group {
+            if let url = picture ?? (looked ? fallback : nil) {
+                CatalogArtwork(url: url, size: size)
+            } else {
+                Circle().fill(Color(white: 0.16))
+                    .overlay(Image(systemName: "person.fill").font(.system(size: size * 0.35)).foregroundStyle(.secondary))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .task(id: name) {
+            picture = await SearchHelper.artistPicture(name)
+            looked = true
+        }
+    }
+}
+
+/// An artist's page like Spotify's: photo and name, their most played songs,
+/// then albums and singles, newest first. Soulseek is asked about the artist
+/// as the page opens, so GET on their songs has sources at once.
 struct ArtistView: View {
+    @EnvironmentObject private var client: SoulseekClient
+    @EnvironmentObject private var player: MusicPlayer
     let artist: ITunesItem
     @State private var songs: [ITunesItem] = []
     @State private var albums: [ITunesItem] = []
     @State private var loading = true
+    @State private var showAllSongs = false
+
+    private var name: String { artist.artistName ?? "Artist" }
+
+    private func newestFirst(_ list: [ITunesItem]) -> [ITunesItem] {
+        list.sorted { ($0.releaseDate ?? "") > ($1.releaseDate ?? "") }
+    }
 
     var body: some View {
         List {
+            Section {
+                VStack(spacing: 12) {
+                    ArtistPicture(name: name, fallback: albums.first?.artworkURL(size: 600), size: 180)
+                        .shadow(color: .black.opacity(0.4), radius: 20, y: 10)
+                    Text(name).font(.largeTitle.weight(.bold)).tracking(-0.8)
+                        .multilineTextAlignment(.center).lineLimit(2).minimumScaleFactor(0.6)
+                    if !albums.isEmpty {
+                        Text("\(albums.filter { !$0.isSingle }.count) albums · \(albums.filter(\.isSingle).count) singles & EPs")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .listRowBackground(Color.clear)
+            }
             if !songs.isEmpty {
-                Section("Top Songs") {
-                    ForEach(songs.prefix(10)) { song in SongRow(song: song) }
+                Section("Popular") {
+                    ForEach(Array(songs.prefix(showAllSongs ? 25 : 5).enumerated()), id: \.element.id) { offset, song in
+                        SongRow(song: song, leading: "\(offset + 1)")
+                    }
+                    if songs.count > 5 {
+                        Button(showAllSongs ? "Show Less" : "See More") {
+                            withAnimation(.snappy) { showAllSongs.toggle() }
+                        }
+                        .font(.subheadline.weight(.semibold))
+                    }
                 }
             }
-            AlbumCarousel(title: "Albums", albums: albums.filter { !$0.isSingle })
-            AlbumCarousel(title: "Singles & EPs", albums: albums.filter(\.isSingle))
+            AlbumCarousel(title: "Albums", albums: newestFirst(albums.filter { !$0.isSingle }))
+            AlbumCarousel(title: "Singles & EPs", albums: newestFirst(albums.filter(\.isSingle)))
         }
-        .overlay { if loading { ProgressView() } }
-        .navigationTitle(artist.artistName ?? "Artist")
+        .overlay { if loading && songs.isEmpty { ProgressView() } }
+        .navigationTitle(name)
+        .navigationBarTitleDisplayMode(.inline)
         .onDisappear { PreviewPlayer.shared.stop() }
+        .onAppear { client.prefetch(name) }
         .task {
             guard let id = artist.artistId else { return }
             async let s = try? ITunesCatalog.artistSongs(id)
             async let a = try? ITunesCatalog.artistAlbums(id)
-            let (songResults, albumResults) = await (s, a)
-            songs = songResults ?? []
-            albums = albumResults ?? []
+            async let h = SearchHelper.popular(name)
+            let (songResults, albumResults, hits) = await (s, a, h)
+            // Their own songs only, most played first, each title once.
+            var seen = Set<String>()
+            songs = SearchHelper.byPopularity(songResults ?? [], hits: hits)
+                .filter { SearchHelper.fold($0.artistName ?? "").contains(SearchHelper.fold(name)) }
+                .filter { seen.insert(SearchHelper.fold(MusicText.clean($0.trackName ?? ""))).inserted }
+            // One copy of each album (the catalogue lists clean and explicit separately).
+            var titles = Set<String>()
+            albums = (albumResults ?? []).filter { titles.insert(SearchHelper.fold($0.collectionName ?? "")).inserted }
             loading = false
         }
     }
@@ -415,6 +500,7 @@ private struct GetSongButton: View {
     @EnvironmentObject private var player: MusicPlayer
     let song: ITunesItem
     @State private var choosing = false
+    @ObservedObject private var sources = SourceAddOnStore.shared
 
     private var key: String { "song-\(song.id)" }
 
@@ -423,19 +509,22 @@ private struct GetSongButton: View {
             .sheet(isPresented: $choosing) {
                 QualitySheet(kind: .song(song), key: key)
                     .environmentObject(client)
+                    .environmentObject(library)
+                    .environmentObject(player)
             }
     }
 
     private var button: some View {
         FetchButton(state: client.fetches[key], transfers: client.transfers, label: "GET") {
-            guard client.isConnected else { return }
+            guard client.isConnected || !sources.enabled.isEmpty else { return }
             PreviewPlayer.shared.stop()
             choosing = true
         } onPlay: { url in
             library.reload()
             player.play([library.track(for: url)], startAt: 0)
         }
-        .disabled(!client.isConnected)
+        // Works with Soulseek, your source add-ons, or both.
+        .disabled(!client.isConnected && sources.enabled.isEmpty)
     }
 }
 

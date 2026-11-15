@@ -166,7 +166,9 @@ enum SlskQuality: String, CaseIterable, Identifiable, Comparable, Sendable {
 /// word (accents and case ignored), so "star" doesn't match "starboy".
 enum SlskMatch {
     static func words(_ text: String) -> [String] {
-        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        // "Don't" and "Dont" are the same word; so are "Beyoncé" and "Beyonce".
+        text.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "’", with: "")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
     }

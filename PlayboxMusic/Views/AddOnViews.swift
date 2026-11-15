@@ -6,7 +6,11 @@ import SwiftUI
 /// switches it on; its page says what it sends and where.
 struct AddOnStoreView: View {
     @ObservedObject private var store = AddOnStore.shared
+    @ObservedObject private var sources = SourceAddOnStore.shared
     @State private var opened: AddOn?
+    @State private var addingLink = false
+    @State private var openedSource: SourceManifest?
+    @State private var installing: String?
 
     /// The best-known free services of each kind, shown first.
     private let featured: [AddOn] = [.internetArchive, .smartSearch, .lrclib]
@@ -25,6 +29,73 @@ struct AddOnStoreView: View {
                 }
                 .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 10, trailing: 0))
                 .listRowBackground(Color.clear)
+            }
+
+            Section {
+                Button { addingLink = true } label: {
+                    Label("Add from Link", systemImage: "link.badge.plus").font(.body.weight(.semibold))
+                }
+            } footer: {
+                Text("Paste a link to an add-on (JSON, a GitHub page or any web page that has one), or the JSON itself.")
+            }
+
+            if !sources.manifests.isEmpty {
+                Section("Your Add-ons") {
+                    ForEach(sources.manifests) { manifest in
+                        Button { openedSource = manifest } label: {
+                            SourceRow(manifest: manifest, on: sources.isOn(manifest.id)) {
+                                sources.set(manifest.id, on: !sources.isOn(manifest.id))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete { offsets in
+                        offsets.map { sources.manifests[$0].id }.forEach(sources.remove)
+                    }
+                }
+            }
+
+            Section {
+                ForEach(CommunityAddOn.all) { item in
+                    HStack(spacing: 14) {
+                        AddOnIcon(symbol: item.symbol)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.name).font(.body.weight(.semibold))
+                            Text(item.tagline).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer(minLength: 8)
+                        if sources.manifests.contains(where: { $0.id == item.id }) {
+                            Text("Added").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                        } else if installing == item.id {
+                            ProgressView()
+                        } else {
+                            Button {
+                                installing = item.id
+                                Task {
+                                    if let found = try? await SourceAddOns.manifests(from: item.link) {
+                                        sources.install(found)
+                                    }
+                                    installing = nil
+                                }
+                            } label: {
+                                Text("Get").font(.subheadline.weight(.bold)).foregroundStyle(.black)
+                                    .frame(minWidth: 72, minHeight: 30)
+                                    .background(Color.brand, in: Capsule())
+                            }
+                            .buttonStyle(PressScaleStyle())
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .contextMenu {
+                        Button { UIPasteboard.general.string = item.link } label: {
+                            Label("Copy Link", systemImage: "doc.on.doc")
+                        }
+                    }
+                }
+            } header: {
+                Text("More Sources")
+            } footer: {
+                Text("Free, legal sources described by add-on files in Playbox Music's GitHub repo. Press and hold one to copy its link.")
             }
 
             ForEach(AddOn.Kind.allCases) { kind in
@@ -50,6 +121,284 @@ struct AddOnStoreView: View {
         }
         .navigationTitle("Add-ons")
         .sheet(item: $opened) { AddOnDetail(addOn: $0) }
+        .sheet(isPresented: $addingLink) { AddFromLinkSheet() }
+        .sheet(item: $openedSource) { SourceDetail(manifest: $0) }
+    }
+}
+
+/// Ready-made source add-ons, kept as files in the app's GitHub repo.
+struct CommunityAddOn: Identifiable {
+    let id: String
+    let name: String
+    let tagline: String
+    let symbol: String
+    let file: String
+
+    var link: String { "https://raw.githubusercontent.com/user445879785/playboxmusic/main/addons/\(file)" }
+
+    static let all: [CommunityAddOn] = [
+        CommunityAddOn(id: "audius", name: "Audius", tagline: "Free music uploaded by artists.",
+                       symbol: "waveform.circle.fill", file: "audius.json"),
+        CommunityAddOn(id: "openverse", name: "Openverse Audio", tagline: "Creative Commons and public domain audio.",
+                       symbol: "globe", file: "openverse.json"),
+        CommunityAddOn(id: "ccmixter", name: "ccMixter", tagline: "Remixes, a cappellas and instrumentals.",
+                       symbol: "slider.horizontal.3", file: "ccmixter.json"),
+        CommunityAddOn(id: "funkwhale-open-audio", name: "Funkwhale", tagline: "Openly licensed music on open.audio.",
+                       symbol: "point.3.connected.trianglepath.dotted", file: "funkwhale.json"),
+        CommunityAddOn(id: "wikimedia-commons", name: "Wikimedia Commons", tagline: "Public domain recordings.",
+                       symbol: "books.vertical.fill", file: "wikimedia-commons.json"),
+        CommunityAddOn(id: "radio-browser", name: "Radio Browser", tagline: "50,000 live radio stations.",
+                       symbol: "dot.radiowaves.left.and.right", file: "radio-browser.json"),
+        CommunityAddOn(id: "radio-browser-genre", name: "Radio by Genre", tagline: "Live stations by genre or mood.",
+                       symbol: "radio.fill", file: "radio-browser-genre.json")
+    ]
+}
+
+private struct SourceRow: View {
+    let manifest: SourceManifest
+    let on: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            AddOnIcon(symbol: manifest.icon ?? "music.note.list")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(manifest.name).font(.body.weight(.semibold)).lineLimit(1)
+                Text(manifest.about ?? manifest.hosts.joined(separator: ", "))
+                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Button(action: toggle) {
+                Text(on ? "On" : "Off")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(on ? Color.black : Color.secondary)
+                    .frame(minWidth: 60, minHeight: 30)
+                    .background(on ? Color.brand : Color(white: 0.2), in: Capsule())
+            }
+            .buttonStyle(PressScaleStyle())
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Paste a link or the add-on itself; see what it is, then add it.
+private struct AddFromLinkSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var found: [SourceManifest] = []
+    @State private var error: String?
+    @State private var reading = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://… or { \"playbox\": 1, … }", text: $text, axis: .vertical)
+                        .lineLimit(3...10)
+                        .font(.callout.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        if let pasted = UIPasteboard.general.string { text = pasted }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                } footer: {
+                    Text("A link to the add-on's JSON, a GitHub page or a web page that has one, or the JSON itself.")
+                }
+                if let error {
+                    Section { Text(error).foregroundStyle(.orange) }
+                }
+                ForEach(found) { manifest in
+                    Section(manifest.name) {
+                        if let about = manifest.about { Text(about) }
+                        LabeledContent("Sends your searches to", value: manifest.hosts.joined(separator: ", "))
+                        if manifest.search.stream == true {
+                            Label("Plays live streams; nothing is downloaded.", systemImage: "dot.radiowaves.left.and.right")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add from Link")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    if found.isEmpty {
+                        Button("Check") { check() }
+                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reading)
+                    } else {
+                        Button("Add") {
+                            SourceAddOnStore.shared.install(found)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .overlay { if reading { ProgressView() } }
+            .onChange(of: text) { _, _ in
+                found = []
+                error = nil
+            }
+        }
+    }
+
+    private func check() {
+        reading = true
+        error = nil
+        Task {
+            do {
+                found = try await SourceAddOns.manifests(from: text)
+            } catch {
+                self.error = error.localizedDescription
+            }
+            reading = false
+        }
+    }
+}
+
+private struct SourceDetail: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var sources = SourceAddOnStore.shared
+    let manifest: SourceManifest
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 16) {
+                        AddOnIcon(symbol: manifest.icon ?? "music.note.list", size: 72)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(manifest.name).font(.title3.weight(.bold))
+                            if let home = manifest.homepage { Text(home).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                    if let about = manifest.about { Text(about) }
+                }
+                Section("What it sends") {
+                    Text("The words you search for, to \(manifest.hosts.joined(separator: ", ")).")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Section {
+                    Toggle("On", isOn: Binding(get: { sources.isOn(manifest.id) },
+                                               set: { sources.set(manifest.id, on: $0) }))
+                        .tint(.brand)
+                    Button("Remove Add-on", role: .destructive) {
+                        sources.remove(manifest.id)
+                        dismiss()
+                    }
+                }
+            }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - Results from source add-ons
+
+/// One add-on's results for some words, with Play and Download.
+struct SourceResultsSection: View {
+    @EnvironmentObject private var library: MusicLibrary
+    @EnvironmentObject private var player: MusicPlayer
+    let manifest: SourceManifest
+    let query: String
+    var meta: TrackMeta?
+    var limit = 40
+    @State private var hits: [SourceHit] = []
+    @State private var loading = false
+    @State private var states: [String: SourceDownload] = [:]
+
+    enum SourceDownload: Equatable {
+        case downloading
+        case done(URL)
+        case failed
+    }
+
+    var body: some View {
+        Section {
+            if loading && hits.isEmpty {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Searching \(manifest.name)…").foregroundStyle(.secondary)
+                }
+            } else if hits.isEmpty {
+                Text("Nothing on \(manifest.name).").font(.subheadline).foregroundStyle(.secondary)
+            }
+            ForEach(hits.prefix(limit)) { hit in
+                HStack(spacing: 12) {
+                    CatalogArtwork(url: hit.artwork, size: 44)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(hit.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text([hit.artist, hit.format, hit.duration.map(TrackFacts.format)].compactMap { $0 }
+                            .joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 6)
+                    Button {
+                        player.play([Track(url: hit.audio, addedAt: Date())], startAt: 0)
+                    } label: {
+                        Image(systemName: "play.circle").font(.title2).foregroundStyle(Color.brand)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Play \(hit.title)")
+                    if !hit.isStream { downloadButton(hit) }
+                }
+            }
+        } header: {
+            Text(manifest.name)
+        }
+        .task(id: query) {
+            let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard term.count >= 2 else {
+                hits = []
+                return
+            }
+            do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+            loading = true
+            let found = await SourceAddOns.search(manifest, for: term)
+            if !Task.isCancelled { hits = found }
+            loading = false
+        }
+    }
+
+    @ViewBuilder
+    private func downloadButton(_ hit: SourceHit) -> some View {
+        switch states[hit.id] {
+        case .downloading:
+            ProgressView().frame(width: 28)
+        case .done:
+            Image(systemName: "checkmark.circle.fill").font(.title2).foregroundStyle(Color.brand)
+        case .failed:
+            Button { download(hit) } label: {
+                Image(systemName: "arrow.clockwise.circle").font(.title2).foregroundStyle(.orange)
+            }
+            .buttonStyle(.plain)
+        case nil:
+            Button { download(hit) } label: {
+                Image(systemName: "arrow.down.circle").font(.title2).foregroundStyle(Color.brand)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Download \(hit.title)")
+        }
+    }
+
+    private func download(_ hit: SourceHit) {
+        states[hit.id] = .downloading
+        let root = library.root
+        Task {
+            do {
+                let url = try await SourceAddOns.download(hit, into: root)
+                // Catalogue details when it was fetched for a catalogue song.
+                if let meta { library.setMeta(meta, for: url) }
+                states[hit.id] = .done(url)
+                await library.refresh()
+            } catch {
+                states[hit.id] = .failed
+            }
+        }
     }
 }
 

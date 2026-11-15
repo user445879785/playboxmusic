@@ -1,0 +1,18 @@
+{
+  "playbox": 1,
+  "id": "radio-browser-genre",
+  "name": "Radio by Genre",
+  "about": "Radio Browser stations by genre or mood: try \"hip hop\", \"lofi\", \"rai\" or \"jazz\". Stations play live.",
+  "homepage": "https://www.radio-browser.info",
+  "icon": "radio.fill",
+  "search": {
+    "url": "https://de1.api.radio-browser.info/json/stations/search?tag={query}&limit=40&hidebroken=true&order=clickcount&reverse=true",
+    "results": "",
+    "title": "name",
+    "artist": "country",
+    "artwork": "favicon",
+    "audio": "url_resolved",
+    "format": "codec",
+    "stream": true
+  }
+}
