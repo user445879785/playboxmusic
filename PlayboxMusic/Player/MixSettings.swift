@@ -273,7 +273,7 @@ final class MixSettings: ObservableObject {
         // then the next one waits for the rest (a gap you chose).
         let latest = max(0, outDuration - 0.02)
         if start > latest {
-            entry -= (start - latest) * (ratio ?? 1)
+            entry -= (start - latest) * Double(ratio ?? 1)
             start = latest
         }
 
